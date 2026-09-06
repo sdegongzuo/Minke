@@ -34,6 +34,9 @@ import {
   AgentBrowserEmbedderRegistry,
 } from "./agent-browser/embedder-registry";
 import {
+  AgentBrowserPopoutRuntime,
+} from "./agent-browser/popout-window";
+import {
   installHarnessPermissionPolicy,
 } from "./harness-permission-policy";
 import { bindMacOSWindowButtonSpacing } from "./macos-window-controls";
@@ -112,6 +115,27 @@ export class MainWindowRuntime {
   /** Windows allowed to reach the Agent Browser projection channels. */
   get agentBrowserEmbedders(): AgentBrowserEmbedderRegistry {
     return this.#agentBrowserEmbedders;
+  }
+
+  /** Build the independent Agent Browser window runtime for this app. */
+  createAgentBrowserPopoutRuntime(): AgentBrowserPopoutRuntime {
+    return new AgentBrowserPopoutRuntime({
+      agentBrowser: this.#options.agentBrowser,
+      embedders: this.#agentBrowserEmbedders,
+      surfaceSession: this.#surfaceSession,
+      harnessUrl: () => this.#options.harnessUrl(),
+      locale: () => this.#activeLocale(),
+      preloadPath: join(__dirname, "desktop-preload.js"),
+      runtimeRoot: this.#runtimeRoot(),
+      electronExecutable: process.execPath,
+      defaultCwd: app.getPath("home"),
+      fileSystemRoot: parse(app.getPath("home")).root,
+      minkeConfigPath: minkeConfigFilePath(
+        app.getPath("userData"),
+      ),
+      environment: this.#options.environment(),
+      prepareWebSession: () => this.#prepareTabsWebSession(),
+    });
   }
 
   installPermissionPolicy(): void {

@@ -16,6 +16,13 @@ export {
   type AgentBrowserWebviewDecision,
 } from "./runtime.ts";
 export {
+  AgentBrowserEmbedderRegistry,
+} from "./embedder-registry.ts";
+export {
+  AgentBrowserPopoutRuntime,
+  type AgentBrowserPopoutRuntimeOptions,
+} from "./popout-window.ts";
+export {
   SqliteAgentBrowserHistory,
   agentBrowserHistoryFilePath,
   type AgentBrowserHistoryPort,

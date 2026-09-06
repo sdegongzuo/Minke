@@ -50,6 +50,7 @@ import {
 } from "./app-update";
 import { AppUpdateRuntime } from "./app-update-runtime";
 import {
+  AgentBrowserPopoutRuntime,
   AgentBrowserRuntime,
   SqliteAgentBrowserHistory,
   agentBrowserHistoryFilePath,
@@ -149,6 +150,9 @@ class DesktopApplication {
     | AppUpdateSettingsBinding
     | undefined;
   #agentBrowser: AgentBrowserRuntime | undefined;
+  #agentBrowserPopouts:
+    | AgentBrowserPopoutRuntime
+    | undefined;
   #browserSettingsBinding: BrowserSettingsBinding | undefined;
   #runtime: HarnessRuntime | undefined;
   #harnessLifecycle: HarnessLifecycle | undefined;
@@ -219,6 +223,8 @@ class DesktopApplication {
     });
     this.#windows = windows;
     windows.installPermissionPolicy();
+    this.#agentBrowserPopouts =
+      windows.createAgentBrowserPopoutRuntime();
 
     const minkeConfig = new MinkeConfigStore(
       app.getPath("userData"),
@@ -722,6 +728,8 @@ class DesktopApplication {
       this.#remoteAccess === undefined &&
       this.#remoteHub === undefined
     ) {
+      this.#agentBrowserPopouts?.dispose();
+      this.#agentBrowserPopouts = undefined;
       this.#agentBrowser?.dispose();
       this.#agentBrowser = undefined;
       if (this.#requestedExitCode !== undefined) {
@@ -746,6 +754,8 @@ class DesktopApplication {
           try {
             await activeRuntime?.stop();
           } finally {
+            this.#agentBrowserPopouts?.dispose();
+            this.#agentBrowserPopouts = undefined;
             this.#agentBrowser?.dispose();
             this.#agentBrowser = undefined;
           }
