@@ -112,12 +112,18 @@ export function desktopAgentBrowserPort(
           "Minke desktop Agent Browser bridge is unavailable",
         );
       },
-      async commitAnnotation() {
-        throw new Error(
-          "Minke desktop Agent Browser bridge is unavailable",
-        );
-      },
-      close() {},
+    async commitAnnotation() {
+      throw new Error(
+        "Minke desktop Agent Browser bridge is unavailable",
+      );
+    },
+    async openPopout() {
+      throw new Error(
+        "Minke desktop Agent Browser bridge is unavailable",
+      );
+    },
+    closePopout() {},
+    close() {},
       subscribe() {
         return () => {};
       },
@@ -193,6 +199,14 @@ export function desktopAgentBrowserPort(
       return parseAgentBrowserAnnotationCommitResult(
         await bridge.commitAnnotation(parsed),
       );
+    },
+    async openPopout(sessionId) {
+      await bridge.openPopout(
+        parseAgentBrowserSessionId(sessionId),
+      );
+    },
+    closePopout() {
+      bridge.closePopout();
     },
     close(sessionId) {
       bridge.close(parseAgentBrowserSessionId(sessionId));

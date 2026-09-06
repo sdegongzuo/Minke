@@ -16,6 +16,9 @@ import { installPwa } from "./pwa/install.tsx";
 import { installRemote } from "./remote/install.tsx";
 import { installRemoteHub } from "./remote-hub/install.tsx";
 import { installShortcuts } from "./shortcuts/install.tsx";
+import {
+  installAgentBrowserPopout,
+} from "./tabs/agent-browser/popout.tsx";
 import { installTabs } from "./tabs/install.tsx";
 
 /** Cordis services required by this out-of-tree browser plugin. */
@@ -33,6 +36,9 @@ export const inject = [
 
 /** Compose Minke features through Harness's public services and slots. */
 export function apply(ctx: HarnessClientContext): void {
+  // A dedicated Agent Browser popout window renders a standalone view and
+  // never boots the full workspace composition.
+  if (installAgentBrowserPopout(ctx)) return;
   const minkeSettings = new MinkeSettingsRuntime();
   installDesktopClient(ctx);
   installAbout(ctx);

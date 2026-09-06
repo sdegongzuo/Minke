@@ -4,6 +4,7 @@ import {
   type AgentBrowserNavigationCommand,
   type AgentBrowserOwner,
   type AgentBrowserProjection,
+  type AgentBrowserProjectionHost,
 } from "@minke/harness-overlay/agent-browser-contract.ts";
 import {
   parseAgentBrowserHistoryClearRequest,
@@ -61,6 +62,19 @@ interface ActiveAgentBrowserAnnotation
 export interface AgentBrowserAnnotationDependencies {
   readonly chat: AgentBrowserChatPort;
   readonly composeImage?: typeof composeAgentBrowserAnnotationImage;
+}
+
+/**
+ * Which window role this controller serves.
+ *
+ * The sidebar shows every session not hosted by a popout and demounts its
+ * local view when the runtime hands a session to a popout window; a popout
+ * page shows exactly the one session it was opened for.
+ */
+export interface AgentBrowserTabsControllerOptions {
+  readonly role?: AgentBrowserProjectionHost;
+  /** Required when `role` is "popout". */
+  readonly popoutSessionId?: string;
 }
 
 const IDLE_ANNOTATION_SNAPSHOT: AgentBrowserAnnotationSnapshot =
@@ -128,6 +142,8 @@ export class AgentBrowserTabsController {
   readonly #tabs: TabsRuntime;
   readonly #port: AgentBrowserTabsPort;
   readonly #chat: AgentBrowserChatPort;
+  readonly #role: AgentBrowserProjectionHost;
+  readonly #popoutSessionId: string | undefined;
   readonly #composeImage: typeof composeAgentBrowserAnnotationImage;
   readonly #tabBySession = new Map<string, string>();
   readonly #sessionByTab = new Map<string, string>();
@@ -157,9 +173,20 @@ export class AgentBrowserTabsController {
     tabs: TabsRuntime,
     port: AgentBrowserTabsPort,
     dependencies?: AgentBrowserAnnotationDependencies,
+    options?: AgentBrowserTabsControllerOptions,
   ) {
     this.#tabs = tabs;
     this.#port = port;
+    this.#role = options?.role ?? "sidebar";
+    this.#popoutSessionId = options?.popoutSessionId;
+    if (
+      this.#role === "popout" &&
+      this.#popoutSessionId === undefined
+    ) {
+      throw new TypeError(
+        "Agent Browser popout controller requires a session id",
+      );
+    }
     this.#chat = dependencies?.chat ?? UNAVAILABLE_CHAT;
     this.#composeImage =
       dependencies?.composeImage ?? composeAgentBrowserAnnotationImage;
@@ -686,6 +713,44 @@ export class AgentBrowserTabsController {
     );
   }
 
+  /** Whether this renderer may offer the popout action for the tab. */
+  canPopout(tab: ManagedTab): boolean {
+    return (
+      this.#role === "sidebar" &&
+      this.#port.available &&
+      isAgentBrowserTab(tab)
+    );
+  }
+
+  /**
+   * Move the tab's session into a dedicated popout window.
+   *
+   * The main process detaches the sidebar guest first; the projection then
+   * reports `host: "popout"` and the local view unmounts via #applySnapshot.
+   */
+  async openPopout(tabId: string): Promise<void> {
+    const tab = this.#tabs.tab(tabId);
+    if (
+      this.#disposed ||
+      tab === undefined ||
+      !this.canPopout(tab)
+    ) {
+      return;
+    }
+    const sessionId = tab.payload.sessionId;
+    try {
+      await this.#port.openPopout(sessionId);
+    } catch (error) {
+      this.#controlErrors.set(
+        sessionId,
+        error instanceof Error
+          ? error.message
+          : String(error),
+      );
+      this.#refreshPresentation(sessionId);
+    }
+  }
+
   beforeClose(tab: ManagedTab): boolean {
     if (isAgentBrowserTab(tab)) this.#requestClose(tab.id);
     return true;
@@ -747,22 +812,45 @@ export class AgentBrowserTabsController {
   ): void {
     if (this.#disposed) return;
     const projections = parseAgentBrowserProjections(value);
+    const visible = projections.filter((projection) =>
+      this.#role === "popout"
+        ? projection.sessionId === this.#popoutSessionId
+        : true,
+    );
     const incoming = new Map(
-      projections.map((projection) => [
+      visible.map((projection) => [
         projection.sessionId,
         projection,
       ]),
     );
+
+    // The runtime handed this session to a popout window: drop the local
+    // guest view without sending a close (forget runs before tabs.close so
+    // #releaseClosedTabs never treats the demount as a user close).
+    if (this.#role === "sidebar") {
+      for (const [sessionId, tabId] of this.#tabBySession) {
+        if (incoming.get(sessionId)?.host !== "popout") continue;
+        this.#forget(sessionId, tabId);
+        this.#tabs.close(tabId);
+      }
+    }
 
     for (const [sessionId, tabId] of this.#tabBySession) {
       if (incoming.has(sessionId)) continue;
       this.#forget(sessionId, tabId);
       this.#tabs.close(tabId);
     }
-    for (const projection of incoming.values()) {
-      if (!this.#locallyClosed.has(projection.sessionId)) {
-        this.#upsert(projection);
+    for (const projection of visible) {
+      if (this.#locallyClosed.has(projection.sessionId)) {
+        continue;
       }
+      if (
+        this.#role === "sidebar" &&
+        projection.host === "popout"
+      ) {
+        continue;
+      }
+      this.#upsert(projection);
     }
   }
 

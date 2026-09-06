@@ -167,10 +167,13 @@ import {
   AGENT_BROWSER_CLOSE_CHANNEL,
   AGENT_BROWSER_CONTROL_CHANNEL,
   AGENT_BROWSER_NAVIGATION_CHANNEL,
+  AGENT_BROWSER_POPOUT_CLOSE_CHANNEL,
+  AGENT_BROWSER_POPOUT_OPEN_CHANNEL,
   AGENT_BROWSER_SESSIONS_CHANGED_CHANNEL,
   AGENT_BROWSER_SESSIONS_READ_CHANNEL,
   parseAgentBrowserControlRequest,
   parseAgentBrowserNavigationRequest,
+  parseAgentBrowserPopoutRequest,
   parseAgentBrowserProjection,
   parseAgentBrowserProjections,
   parseAgentBrowserSessionId,
@@ -470,6 +473,15 @@ const agentBrowser = Object.freeze({
       AGENT_BROWSER_CLOSE_CHANNEL,
       parseAgentBrowserSessionId(sessionId),
     );
+  },
+  async openPopout(sessionId: string): Promise<void> {
+    await ipcRenderer.invoke(
+      AGENT_BROWSER_POPOUT_OPEN_CHANNEL,
+      parseAgentBrowserPopoutRequest({ sessionId }),
+    );
+  },
+  closePopout(): void {
+    ipcRenderer.send(AGENT_BROWSER_POPOUT_CLOSE_CHANNEL);
   },
   subscribe(
     listener: (

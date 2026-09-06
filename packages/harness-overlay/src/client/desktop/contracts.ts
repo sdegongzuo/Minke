@@ -227,6 +227,8 @@ export interface DesktopAgentBrowserPort {
   commitAnnotation(
     request: AgentBrowserAnnotationRefreshRequest,
   ): Promise<AgentBrowserAnnotationCommitResult>;
+  openPopout(sessionId: string): Promise<void>;
+  closePopout(): void;
   close(sessionId: string): void;
   subscribe(
     listener: (

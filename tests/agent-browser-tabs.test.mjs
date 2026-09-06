@@ -214,10 +214,11 @@ function translate(key) {
   return translations[key];
 }
 
-function fixture(initial = [], dependencies) {
+function fixture(initial = [], dependencies, options) {
   const controlCalls = [];
   const navigationCalls = [];
   const closeCalls = [];
+  const popoutCalls = [];
   const annotationStarts = [];
   const annotationStops = [];
   const annotationCommits = [];
@@ -337,6 +338,10 @@ function fixture(initial = [], dependencies) {
     close(sessionId) {
       closeCalls.push(sessionId);
     },
+    async openPopout(sessionId) {
+      popoutCalls.push(sessionId);
+    },
+    closePopout() {},
     subscribe(next) {
       listener = next;
       return () => {
@@ -358,6 +363,7 @@ function fixture(initial = [], dependencies) {
     tabs,
     port,
     dependencies,
+    options,
   );
   return {
     tabs,
@@ -366,6 +372,7 @@ function fixture(initial = [], dependencies) {
     controlCalls,
     navigationCalls,
     closeCalls,
+    popoutCalls,
     annotationStarts,
     annotationStops,
     annotationCommits,
@@ -1839,6 +1846,85 @@ test("failed return to agent control remains visible in the toolbar", async () =
     renderer.renderView(current, true),
   );
   assert.doesNotMatch(viewMarkup, /data-agent-input-shield/u);
+
+  target.controller.dispose();
+  target.tabs.dispose();
+});
+
+test("sidebar demounts a session hosted by a popout and remounts on return", async () => {
+  const target = fixture([projection("session-1")]);
+  await target.controller.initialize();
+  assert.equal(target.tabs.getSnapshot().tabs.length, 1);
+
+  target.publish([
+    projection("session-1", {
+      host: "popout",
+      status: "pending",
+    }),
+  ]);
+  assert.equal(target.tabs.getSnapshot().tabs.length, 0);
+  assert.deepEqual(target.closeCalls, []);
+
+  target.publish([
+    projection("session-1", {
+      host: "popout",
+      status: "ready",
+    }),
+  ]);
+  assert.equal(target.tabs.getSnapshot().tabs.length, 0);
+
+  target.publish([projection("session-1")]);
+  assert.equal(target.tabs.getSnapshot().tabs.length, 1);
+  assert.deepEqual(target.closeCalls, []);
+
+  target.controller.dispose();
+  target.tabs.dispose();
+});
+
+test("popout controller shows only its own session", async () => {
+  const target = fixture(
+    [projection("session-1"), projection("session-2")],
+    undefined,
+    { role: "popout", popoutSessionId: "session-2" },
+  );
+  await target.controller.initialize();
+
+  const snapshot = target.tabs.getSnapshot();
+  assert.equal(snapshot.tabs.length, 1);
+  assert.equal(snapshot.tabs[0].key, "session:session-2");
+
+  target.publish([
+    projection("session-1"),
+    projection("session-2", { generation: 3 }),
+  ]);
+  assert.equal(target.tabs.getSnapshot().tabs.length, 1);
+  assert.equal(
+    target.tabs.getSnapshot().tabs[0].payload.generation,
+    3,
+  );
+
+  target.controller.dispose();
+  target.tabs.dispose();
+});
+
+test("openPopout requests the port and surfaces failures as control errors", async () => {
+  const target = fixture([projection("session-1", {
+    owner: "human",
+    status: "paused",
+  })]);
+  await target.controller.initialize();
+  const tab = target.tabs.getSnapshot().tabs[0];
+  assert.equal(target.controller.canPopout(tab), true);
+
+  await target.controller.openPopout(tab.id);
+  assert.deepEqual(target.popoutCalls, ["session-1"]);
+
+  target.port.openPopout = async () => {
+    throw new Error("popout_limit_reached");
+  };
+  await target.controller.openPopout(tab.id);
+  const current = target.tabs.getSnapshot().tabs[0];
+  assert.equal(current.payload.controlError, "popout_limit_reached");
 
   target.controller.dispose();
   target.tabs.dispose();

@@ -5,6 +5,9 @@ import type {
 export const agentBrowserTabsZh = {
   "agentBrowser.action.takeControl": "接管页面",
   "agentBrowser.action.returnControl": "交还给 Agent",
+  "agentBrowser.action.popout": "弹出到独立窗口",
+  "agentBrowser.popout.state.relocated": "页面视图已移到独立窗口",
+  "agentBrowser.popout.action.close": "关闭独立窗口",
   "agentBrowser.nav.back": "后退",
   "agentBrowser.nav.forward": "前进",
   "agentBrowser.nav.reload": "刷新",
@@ -97,6 +100,9 @@ export const agentBrowserTabsEn: Record<
 > = {
   "agentBrowser.action.takeControl": "Take control",
   "agentBrowser.action.returnControl": "Return control",
+  "agentBrowser.action.popout": "Open in dedicated window",
+  "agentBrowser.popout.state.relocated": "Page view moved to the dedicated window",
+  "agentBrowser.popout.action.close": "Close dedicated window",
   "agentBrowser.nav.back": "Back",
   "agentBrowser.nav.forward": "Forward",
   "agentBrowser.nav.reload": "Reload",

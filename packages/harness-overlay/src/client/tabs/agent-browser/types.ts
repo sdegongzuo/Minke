@@ -59,6 +59,10 @@ export interface AgentBrowserTabsPort {
   commitAnnotation(
     request: AgentBrowserAnnotationRefreshRequest,
   ): Promise<AgentBrowserAnnotationCommitResult>;
+  /** Move the session's guest view into a dedicated popout window. */
+  openPopout(sessionId: string): Promise<void>;
+  /** Close the popout window that hosts this renderer (popout pages only). */
+  closePopout(): void;
   close(sessionId: string): void;
   subscribe(
     listener: (

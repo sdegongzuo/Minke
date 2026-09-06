@@ -5,6 +5,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import {
+  ExternalLink,
   History,
   Send,
 } from "@lucide/icons";
@@ -332,6 +333,21 @@ export function createAgentBrowserTabRenderer(
             controller={controller}
             t={t}
           />
+          {controller.canPopout(tab) &&
+            hasStableHumanControl(tab.payload) && (
+            <ToolbarButton
+              label={t("agentBrowser.action.popout")}
+              disabled={
+                tab.payload.controlPending ||
+                tab.payload.status === "crashed"
+              }
+              onClick={() => {
+                void controller.openPopout(tab.id);
+              }}
+            >
+              <LucideIcon icon={ExternalLink} size={14} />
+            </ToolbarButton>
+          )}
           <ToolbarButton
             label={t(
               human

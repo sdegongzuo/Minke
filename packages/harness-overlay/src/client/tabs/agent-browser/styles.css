@@ -1092,3 +1092,48 @@
     will-change: auto;
   }
 }
+
+/* --- Popout window ------------------------------------------------- */
+
+.minke-agent-browser__popout-root,
+.minke-agent-browser__popout {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--minke-surface, #0b1220);
+  color: var(--minke-on-surface, #e5eaf2);
+}
+
+.minke-agent-browser__popout-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  flex: none;
+}
+
+.minke-agent-browser__popout-bar .minke-agent-browser__url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.minke-agent-browser__popout-bar button {
+  flex: none;
+}
+
+.minke-agent-browser__popout .minke-agent-browser__view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.minke-agent-browser__popout .minke-agent-browser__guest {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
