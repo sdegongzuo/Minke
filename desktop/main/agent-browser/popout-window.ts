@@ -46,7 +46,8 @@ export interface AgentBrowserPopoutRuntimeOptions {
   defaultCwd: string;
   fileSystemRoot: string;
   minkeConfigPath: string;
-  environment: NodeJS.ProcessEnv;
+  /** Resolved lazily: the DSH environment may not exist at app start. */
+  environment(): NodeJS.ProcessEnv;
   prepareWebSession(): void;
   /** Test seam; production uses MAX_AGENT_BROWSER_POPOUTS. */
   readonly limit?: number;
@@ -236,7 +237,7 @@ export class AgentBrowserPopoutRuntime {
         defaultCwd: this.#options.defaultCwd,
         fileSystemRoot: this.#options.fileSystemRoot,
         minkeConfigPath: this.#options.minkeConfigPath,
-        environment: this.#options.environment,
+        environment: this.#options.environment(),
         agentBrowser: this.#options.agentBrowser,
         prepareWebSession: () =>
           this.#options.prepareWebSession(),

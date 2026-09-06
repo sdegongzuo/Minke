@@ -119,12 +119,18 @@ export class MainWindowRuntime {
       locale: () => this.#activeLocale(),
       preloadPath: join(__dirname, "desktop-preload.js"),
       ...this.#tabsGuestDeps(),
+      // Popout windows are created long after startup; the DSH
+      // environment may not exist when the runtime is constructed.
+      environment: () => this.#options.environment(),
     });
   }
 
   /**
    * Dependencies shared by every webview guest binding, whether hosted in
-   * the main window's tabs or an Agent Browser popout.
+   * the main window's tabs or an Agent Browser popout. Deliberately
+   * excludes the DSH environment: the popout runtime is built at app
+   * start, before that environment exists, so each consumer resolves it
+   * when it actually binds.
    */
   #tabsGuestDeps() {
     return {
@@ -135,7 +141,6 @@ export class MainWindowRuntime {
       minkeConfigPath: minkeConfigFilePath(
         app.getPath("userData"),
       ),
-      environment: this.#options.environment(),
       agentBrowser: this.#options.agentBrowser,
       prepareWebSession: () => this.#prepareTabsWebSession(),
     };
@@ -218,7 +223,11 @@ export class MainWindowRuntime {
       window.webContents,
       shell,
       (candidate) => this.authorize(candidate, window),
-      this.#tabsGuestDeps(),
+      {
+        // The window exists by now, so the DSH environment is ready.
+        environment: this.#options.environment(),
+        ...this.#tabsGuestDeps(),
+      },
     );
     this.#tabsBinding = tabsBinding;
 

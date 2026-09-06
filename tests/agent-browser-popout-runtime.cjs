@@ -194,7 +194,7 @@ async function run() {
       projectRoot,
       '.agent-browser-popout-config.json',
     ),
-    environment: { ...process.env },
+    environment: () => ({ ...process.env }),
     prepareWebSession() {},
     limit: 1,
   });
