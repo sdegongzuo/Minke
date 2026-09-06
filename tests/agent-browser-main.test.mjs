@@ -5481,7 +5481,12 @@ test("debug capture enable/read/disable and restricted execute go through CDP", 
     signal,
   );
   assert.equal(afterNav.enabled, true);
-  assert.deepEqual(afterNav.messages, []);
+  // frameNavigated resets capture; while enabled a lifecycle marker rows in.
+  assert.equal(afterNav.messages.length, 1);
+  assert.match(
+    afterNav.messages[0].text,
+    /\[agent-browser capture\] buffer cleared \(navigation\)/u,
+  );
 
   const disabled = await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(
@@ -5606,7 +5611,12 @@ test("debug clear empties buffers while capture stays enabled", async () => {
     signal,
   );
   assert.equal(cleared.enabled, true);
-  assert.deepEqual(cleared.messages, []);
+  // Clearing while capture stays on writes a lifecycle marker row.
+  assert.equal(cleared.messages.length, 1);
+  assert.match(
+    cleared.messages[0].text,
+    /\[agent-browser capture\] buffer cleared \(agent request\)/u,
+  );
   const networkCleared = await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(
       4,
@@ -5631,7 +5641,65 @@ test("debug clear empties buffers while capture stays enabled", async () => {
     ),
     signal,
   );
-  assert.equal(after.messages[0].text, "fresh");
+  assert.equal(after.messages.at(-1).text, "fresh");
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("network wait deadline marks waitTimedOut; a matched wait resolves without it", async () => {
+  const target = runtimeFixture({ autoEnableDebug: true });
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+
+  const timedOut = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "network",
+      { sessionId, wait: true, timeoutMs: 10, urlContains: "/never" },
+    ),
+    signal,
+  );
+  assert.equal(timedOut.waitTimedOut, true);
+  assert.deepEqual(timedOut.requests, []);
+
+  const pending = target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "network",
+      { sessionId, wait: true, timeoutMs: 5_000, urlContains: "/late" },
+    ),
+    signal,
+  );
+  await settleAsyncWork();
+  await settleAsyncWork();
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "late",
+    type: "XHR",
+    timestamp: 2,
+    request: { method: "GET", url: "https://app.local/late.json" },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "late",
+    response: {
+      status: 200,
+      statusText: "OK",
+      mimeType: "application/json",
+    },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "late",
+    timestamp: 2.01,
+  });
+  const matched = await pending;
+  assert.equal(matched.waitTimedOut, undefined);
+  assert.deepEqual(
+    matched.requests.map((request) => request.url),
+    ["https://app.local/late.json"],
+  );
+
   target.binding.dispose();
   target.runtime.dispose();
 });
@@ -5732,7 +5800,7 @@ test("session auto-enable records load-time events without a preceding enable:tr
     signal,
   );
   assert.equal(consoleView.enabled, true);
-  assert.equal(consoleView.messages[0].text, "load boom");
+  assert.equal(consoleView.messages.at(-1).text, "load boom");
 
   const networkView = await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(
@@ -5801,8 +5869,13 @@ test("load-time console and network rows survive navigate completion and a later
     signal,
   );
   assert.equal(afterNavigateConsole.enabled, true);
-  assert.equal(afterNavigateConsole.messages.length, 1);
-  assert.equal(afterNavigateConsole.messages[0].text, "load boom");
+  // The navigation reset marker precedes the load-time rows.
+  assert.equal(afterNavigateConsole.messages.length, 2);
+  assert.match(
+    afterNavigateConsole.messages[0].text,
+    /\[agent-browser capture\] buffer cleared \(navigation\)/u,
+  );
+  assert.equal(afterNavigateConsole.messages[1].text, "load boom");
 
   const afterNavigateNetwork = await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(
@@ -5854,8 +5927,10 @@ test("load-time console and network rows survive navigate completion and a later
     ),
     signal,
   );
-  assert.equal(afterSnapshotConsole.messages.length, 1);
-  assert.equal(afterSnapshotConsole.messages[0].text, "load boom");
+  // Snapshots do not reset capture: the navigation marker and load-time row
+  // survive.
+  assert.equal(afterSnapshotConsole.messages.length, 2);
+  assert.equal(afterSnapshotConsole.messages[1].text, "load boom");
 
   const afterSnapshotNetwork = await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(

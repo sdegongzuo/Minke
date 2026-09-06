@@ -296,6 +296,8 @@ test("debug collector disable drops events and clear empties buffers", () => {
   });
   debug.markDisabled();
   assert.equal(debug.enabled, false);
+  // Disabling while off leaves no marker: the enabled:false view already
+  // explains an empty buffer.
   assert.deepEqual(debug.readConsole().messages, []);
   assert.deepEqual(debug.readNetwork().requests, []);
 
@@ -319,7 +321,7 @@ test("debug collector disable drops events and clear empties buffers", () => {
   });
   debug.clear();
   assert.equal(debug.enabled, true);
-  assert.deepEqual(debug.readConsole().messages, []);
+  assert.equal(debug.readConsole().messages.length, 1);
   assert.deepEqual(debug.readNetwork().requests, []);
 });
 
@@ -390,7 +392,7 @@ test("explicit clear empties buffers without disabling capture", () => {
   });
   debug.clear();
   assert.equal(debug.enabled, true);
-  assert.deepEqual(debug.readConsole().messages, []);
+  assert.equal(debug.readConsole().messages.length, 1);
   assert.deepEqual(debug.readNetwork().requests, []);
   debug.handleEvent("Runtime.consoleAPICalled", consoleApi("log", "fresh"));
   sendRequest(debug, {
@@ -399,7 +401,7 @@ test("explicit clear empties buffers without disabling capture", () => {
     type: "Fetch",
     status: 201,
   });
-  assert.equal(debug.readConsole().messages[0].text, "fresh");
+  assert.equal(debug.readConsole().messages.at(-1).text, "fresh");
   assert.equal(debug.readNetwork().requests[0].url, "https://api.local/fresh");
 });
 

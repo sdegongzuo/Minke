@@ -12,6 +12,7 @@ import {
   type AgentBrowserNetworkResult,
   type AgentBrowserNodeAction,
   type AgentBrowserOperation,
+  type AgentBrowserOperationResult,
   type AgentBrowserOwner,
   type AgentBrowserScrollResult,
   type AgentBrowserScreenshotResult,
@@ -74,6 +75,20 @@ const ELEMENT_MUTATION_OPERATIONS = new Set<AgentBrowserOperation>([
   "fill",
   "press",
 ]);
+/**
+ * Observation/debug operations that expose evidence without mutating the
+ * page. A policy stop on one of these must not conclude the agent turn —
+ * re-reading unchanged evidence is normal in debugging loops.
+ */
+const READ_ONLY_BROWSER_OPERATIONS = new Set<AgentBrowserOperation>([
+  "snapshot",
+  "find",
+  "locate",
+  "screenshot",
+  "console",
+  "network",
+  "execute",
+]);
 const OBSERVATION_RECOVERY_CODES = new Set([
   "snapshot_required",
   "stale_ref",
@@ -135,6 +150,11 @@ interface AgentBrowserNoProgressResult {
   readonly code: string;
   readonly message: string;
   readonly resumeAfter: "new_turn";
+  /**
+   * Present when the stop fired on a read-only operation: the agent turn is
+   * NOT concluded, only further browser calls are blocked for this turn.
+   */
+  readonly warning?: string;
 }
 
 type AgentBrowserActionAuthorization =
@@ -664,6 +684,11 @@ const NETWORK_RESULT_SCHEMA = {
       description:
         "High-water network id. Pass as since_id on a later read to receive only newer requests.",
     },
+    waitTimedOut: {
+      type: "boolean",
+      description:
+        "Present on a wait:true read that hit its deadline; the returned slice is the current matching view, not a completed wait.",
+    },
   },
   required: [
     "sessionId",
@@ -718,7 +743,7 @@ const NO_PROGRESS_RESULT_SCHEMA = {
       type: "string",
       const: "no_progress",
       description:
-        "The host ended a browser path after detecting that further calls would not advance it.",
+        "The host stopped a browser path after detecting that further calls would not advance it.",
     },
     code: {
       type: "string",
@@ -733,6 +758,11 @@ const NO_PROGRESS_RESULT_SCHEMA = {
       const: "new_turn",
       description:
         "No further browser operation should be attempted in this turn.",
+    },
+    warning: {
+      type: "string",
+      description:
+        "Present when the stop fired on a read-only tool: mirror of message. The agent turn is not concluded; only further browser calls are blocked for this turn.",
     },
   },
   required: ["outcome", "code", "message", "resumeAfter"],
@@ -1526,6 +1556,15 @@ function findQueryPayload(
   value: unknown,
   toolName: string,
 ): Record<string, unknown> {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    throw new TypeError(
+      `${toolName} query must be a semantic-constraint object, e.g. {"text": "login"} or {"role": "button", "name": "提交"}; to search plain page text use {"text": "..."}. A bare string is not accepted.`,
+    );
+  }
   const query = argsRecord(
     value,
     `${toolName} query`,
@@ -2433,6 +2472,46 @@ function debugCaptureLine(enabled: boolean): string {
     : "Capture: disabled. Capture auto-starts when Agent debug is on, or pass enable: true (ideally before navigating) to start capturing.";
 }
 
+/**
+ * Stable identity of the evidence a debug read returned. Two reads that
+ * return different evidence (new messages, new requests, a changed execute
+ * value) must not collide into one policy outcome, otherwise the normal
+ * debug loop "action → read evidence → action → read evidence" is
+ * misclassified as a ping-pong loop and halted.
+ */
+function debugEvidenceKey(
+  operation: AgentBrowserOperation,
+  result: AgentBrowserOperationResult,
+): string | undefined {
+  if (operation === "console") {
+    const console = result as AgentBrowserConsoleResult;
+    return JSON.stringify([
+      "console-evidence",
+      console.lastId,
+      console.totalCount,
+      console.messages.length,
+    ]);
+  }
+  if (operation === "network") {
+    const network = result as AgentBrowserNetworkResult;
+    return JSON.stringify([
+      "network-evidence",
+      network.lastId,
+      network.totalCount,
+      network.requests.length,
+    ]);
+  }
+  if (operation === "execute") {
+    const execute = result as AgentBrowserExecuteResult;
+    return JSON.stringify([
+      "execute-evidence",
+      execute.ok,
+      (execute.value ?? execute.errorText ?? "").slice(0, 400),
+    ]);
+  }
+  return undefined;
+}
+
 function renderConsoleResult(value: unknown): TextContentBlock[] {
   const result = parseAgentBrowserOperationResult(
     "console",
@@ -2487,10 +2566,18 @@ function renderNetworkResult(value: unknown): TextContentBlock[] {
     "network",
     value,
   ) as AgentBrowserNetworkResult;
+  const terminalRequests = result.requests.filter(
+    (request) => request.outcome !== "pending",
+  ).length;
   const lines = [
     `Read ${String(result.requests.length)} of ${String(result.totalCount)} captured network requests in session ${result.sessionId}.`,
     `last_id: ${String(result.lastId)}`,
     debugCaptureLine(result.enabled),
+    ...(result.waitTimedOut === true && terminalRequests === 0
+      ? [
+          "The wait deadline elapsed with no matching finished request. If you just triggered an action that should have sent one, the request likely never fired (client-side validation blocked submit, handler did not run, or wrong URL filter) — check browser_console and form validity, or retry the action with broader filters.",
+        ]
+      : []),
     ...(result.truncated
       ? ["The collector dropped the oldest entries past its cap."]
       : []),
@@ -2565,12 +2652,19 @@ function parseNoProgressResult(
   const result = safeRecord(value);
   if (result?.outcome !== "no_progress") return undefined;
   if (
-    Object.keys(result).length !== 4 ||
+    Object.keys(result).length !== 4 &&
+    Object.keys(result).length !== 5
+  ) {
+    throw new TypeError("invalid Agent Browser no-progress result");
+  }
+  if (
     typeof result.code !== "string" ||
     result.code.length === 0 ||
     typeof result.message !== "string" ||
     result.message.length === 0 ||
-    result.resumeAfter !== "new_turn"
+    result.resumeAfter !== "new_turn" ||
+    (result.warning !== undefined &&
+      (typeof result.warning !== "string" || result.warning.length === 0))
   ) {
     throw new TypeError("invalid Agent Browser no-progress result");
   }
@@ -2579,6 +2673,7 @@ function parseNoProgressResult(
     code: result.code,
     message: result.message,
     resumeAfter: "new_turn",
+    ...(result.warning === undefined ? {} : { warning: result.warning }),
   };
 }
 
@@ -2590,7 +2685,11 @@ function renderNoProgressResult(
     text: [
       `Agent Browser stopped a non-progressing path (${result.code}).`,
       result.message,
-      "No further browser operation is allowed in the current turn. Resume only in a new user turn.",
+      // Read-only stops do not conclude the agent turn: the model keeps
+      // control and should wrap up instead of being silently cut off.
+      result.warning === undefined
+        ? "No further browser operation is allowed in the current turn. Resume only in a new user turn."
+        : "Further browser operations are blocked for the rest of this turn (read-only stop; the turn itself continues). Finish this turn with your findings; browser calls recover next turn.",
     ].join("\n"),
   }];
 }
@@ -2693,24 +2792,37 @@ export function apply(
   const resolved = resolveConfig(config);
   const client = new AgentBrowserProcessClient(port);
   const progressPolicy = new AgentBrowserProgressPolicy();
+  // Read-only tools never conclude the agent turn when the policy stops
+  // them. Debugging legitimately re-reads unchanged pages and re-polls
+  // console/network after every action; a silent concludeTurn there left the
+  // run dead for minutes with no model-visible explanation. The stop still
+  // blocks further browser calls for the turn, so loops stay bounded.
   const concludeNoProgress = (
     exec: AgentBrowserToolExecution,
     code: string,
     message: string,
+    concludeTurn: boolean = true,
   ): Promise<AgentBrowserNoProgressResult> => {
-    exec.concludeTurn?.();
+    if (concludeTurn) exec.concludeTurn?.();
     return Promise.resolve({
       outcome: "no_progress",
       code,
       message,
       resumeAfter: "new_turn",
+      ...(concludeTurn ? {} : { warning: message }),
     });
   };
   const concludePolicyStop = (
     exec: AgentBrowserToolExecution,
     stop: AgentBrowserPolicyStop,
+    operation: AgentBrowserOperation,
   ): Promise<AgentBrowserNoProgressResult> =>
-    concludeNoProgress(exec, stop.code, stop.message);
+    concludeNoProgress(
+      exec,
+      stop.code,
+      stop.message,
+      !READ_ONLY_BROWSER_OPERATIONS.has(operation),
+    );
   const rejectPolicyCall = (
     call: AgentBrowserPolicyCall,
     exec: AgentBrowserToolExecution,
@@ -2722,7 +2834,11 @@ export function apply(
       key: code,
     });
     if (stop !== undefined) {
-      return concludePolicyStop(exec, stop);
+      return concludePolicyStop(
+        exec,
+        stop,
+        call.operation,
+      );
     }
     return Promise.reject(
       new AgentBrowserProcessError(
@@ -3378,7 +3494,11 @@ export function apply(
             },
           );
           if (invalidStop !== undefined) {
-            return concludePolicyStop(exec, invalidStop);
+            return concludePolicyStop(
+              exec,
+              invalidStop,
+              spec.operation,
+            );
           }
           throw error;
         }
@@ -3462,7 +3582,11 @@ export function apply(
         }
         const policyStop = progressPolicy.preflight(policyCall);
         if (policyStop !== undefined) {
-          return concludePolicyStop(exec, policyStop);
+          return concludePolicyStop(
+            exec,
+            policyStop,
+            spec.operation,
+          );
         }
         const mutationSignature =
           ELEMENT_MUTATION_OPERATIONS.has(spec.operation)
@@ -3524,7 +3648,7 @@ export function apply(
             policyCall,
             exec,
             "snapshot_required",
-            `A previous browser action invalidated evidence in session ${browserSessionId}. The only valid recovery step is browser_snapshot.`,
+            `A previous browser action invalidated evidence in session ${browserSessionId}. Take one browser_snapshot before the next ref-targeted mutation. Read-only debug tools (browser_console, browser_network, browser_execute) still work without a fresh snapshot.`,
           );
         }
         if (
@@ -3724,10 +3848,15 @@ export function apply(
                     : { currentUrl: observation.url }),
                 },
               );
+              // An unchanged snapshot is a no-progress result but never a
+              // reason to conclude the agent turn: the page may have changed
+              // invisibly to the snapshot epoch (framework re-render), and
+              // debugging loops re-observe after every action.
               return concludeNoProgress(
                 exec,
                 "snapshot_repeated",
                 `The unchanged snapshot ${observation.snapshotId} was already available and no recovery observation was required. Replaying it cannot add evidence.`,
+                false,
               );
             }
             let observationStop:
@@ -3795,7 +3924,11 @@ export function apply(
               );
             }
             if (observationStop !== undefined) {
-              return concludePolicyStop(exec, observationStop);
+              return concludePolicyStop(
+                exec,
+                observationStop,
+                spec.operation,
+              );
             }
           } else if (spec.operation === "close") {
             const closed = parseAgentBrowserOperationResult(
@@ -3843,6 +3976,10 @@ export function apply(
                     ? payload.url
                     : undefined
                 );
+              const evidence = debugEvidenceKey(
+                spec.operation,
+                operationResult,
+              );
               const sessionStop = progressPolicy.recordOutcome(
                 sessionPolicyCall,
                 {
@@ -3861,6 +3998,7 @@ export function apply(
                           scroll.maxX,
                           scroll.maxY,
                         ]),
+                    ...(evidence === undefined ? [] : [evidence]),
                   ]),
                   progress: scroll?.moved ?? true,
                   ...(currentUrl === undefined
@@ -3869,7 +4007,11 @@ export function apply(
                 },
               );
               if (sessionStop !== undefined) {
-                return concludePolicyStop(exec, sessionStop);
+                return concludePolicyStop(
+                  exec,
+                  sessionStop,
+                  spec.operation,
+                );
               }
             }
           }
@@ -3922,7 +4064,11 @@ export function apply(
           );
           if (screenshotStop !== undefined) {
             screenshotProjections.delete(exec);
-            return concludePolicyStop(exec, screenshotStop);
+            return concludePolicyStop(
+              exec,
+              screenshotStop,
+              spec.operation,
+            );
           }
           return screenshot;
         }).catch((error: unknown) => {
@@ -4012,7 +4158,11 @@ export function apply(
               },
             );
             if (failureStop !== undefined) {
-              return concludePolicyStop(exec, failureStop);
+              return concludePolicyStop(
+                exec,
+                failureStop,
+                spec.operation,
+              );
             }
           }
           throw error;

@@ -1,0 +1,34 @@
+diff --git a/node_modules/@deepseek-ai/dsh-tools/lib/index.js b/node_modules/@deepseek-ai/dsh-tools/lib/index.js
+
+--- a/node_modules/@deepseek-ai/dsh-tools/lib/index.js
++++ b/node_modules/@deepseek-ai/dsh-tools/lib/index.js
+@@ -1341,7 +1341,11 @@ function createRunCodeTool(registry, options) {
+ 				}
+ 				if (result.error) {
+ 					const logsText = result.logs.length > 0 ? `\nCaptured output:\n${result.logs.join("\n")}` : "";
+-					throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${logsText}`);
++					const requireHint = /require is not defined/.test(result.error.message)
++					    ? `
++Hint: run_code programs have no require(). Use await import("node:...") for Node modules, or call the injected tools.* bindings.`
++					    : "";
++					throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${requireHint}${logsText}`);
+ 				}
+ 				return {
+ 					logs: result.logs,
+diff --git a/node_modules/@deepseek-ai/dsh-tools/lib/types/ptc.js b/node_modules/@deepseek-ai/dsh-tools/lib/types/ptc.js
+
+--- a/node_modules/@deepseek-ai/dsh-tools/lib/types/ptc.js
++++ b/node_modules/@deepseek-ai/dsh-tools/lib/types/ptc.js
+@@ -534,7 +534,11 @@ export function createRunCodeTool(registry, options) {
+                 }
+                 if (result.error) {
+                     const logsText = result.logs.length > 0 ? `\nCaptured output:\n${result.logs.join('\n')}` : '';
+-                    throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${logsText}`);
++                    const requireHint = /require is not defined/.test(result.error.message)
++                        ? `
++Hint: run_code programs have no require(). Use await import("node:...") for Node modules, or call the injected tools.* bindings.`
++                        : '';
++                    throw new CodeRunFailedError(`code run failed (${result.error.kind}): ${result.error.message}${requireHint}${logsText}`);
+                 }
+                 return {
+                     logs: result.logs,

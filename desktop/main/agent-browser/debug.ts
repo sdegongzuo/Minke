@@ -610,7 +610,7 @@ export class AgentBrowserDebugCollector {
    */
   markDisabled(): void {
     this.#enabled = false;
-    this.clear();
+    this.clear("capture disabled");
     this.clearSourceMaps();
     this.#resolveNetworkWaiters();
   }
@@ -621,10 +621,18 @@ export class AgentBrowserDebugCollector {
    * Callers must only do this at document commit / navigation start, or when
    * the agent passes `clear: true`. Snapshot and post-load reference
    * invalidation must not empty a load that has already been recorded.
+   *
+   * While capture is enabled a lifecycle marker is appended after clearing so
+   * a later read shows which capture window the remaining rows belong to.
+   * When capture is off the `enabled: false` view already explains an empty
+   * buffer, so no marker is written.
    */
-  clear(): void {
+  clear(reason: string = "reset"): void {
     this.#console = [];
     this.#network.clear();
+    if (this.#enabled) {
+      this.#pushCaptureMarker(`buffer cleared (${reason})`);
+    }
     this.#resolveNetworkWaiters();
   }
 
@@ -874,6 +882,15 @@ export class AgentBrowserDebugCollector {
   #nextId(): number {
     this.#sequence += 1;
     return this.#sequence;
+  }
+
+  /**
+   * Capture-lifecycle marker rendered as a `browser` console row so reads
+   * are self-describing: the agent can tell whether capture was enabled,
+   * cleared, or reset without guessing from empty buffers.
+   */
+  #pushCaptureMarker(text: string): void {
+    this.#pushConsole("info", "browser", `[agent-browser capture] ${text}`, []);
   }
 
   #presentConsole(

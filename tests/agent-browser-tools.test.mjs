@@ -854,7 +854,10 @@ test("zero-match find loops are bounded within one agent turn", async () => {
       "find_repeated",
       /already succeeded.*unchanged page/iu,
     );
-    assert.equal(concludedTurns, 1);
+    // Read-only stops block further browser calls but no longer conclude the
+    // agent turn.
+    assert.equal(concludedTurns, 0);
+    assert.equal(repeated.warning, repeated.message);
     assert.equal(port.sent.length, beforeRepeat);
 
     exec.rootCallId = "turn-2";
@@ -866,7 +869,7 @@ test("zero-match find loops are bounded within one agent turn", async () => {
       "find_exhausted",
       /three distinct searches/iu,
     );
-    assert.equal(concludedTurns, 2);
+    assert.equal(concludedTurns, 0);
   } finally {
     for (const cleanup of cleanups) cleanup();
   }
@@ -960,7 +963,7 @@ test("native top-level call ids do not reset the active turn's zero-match budget
     "find_exhausted",
     /three distinct searches/iu,
   );
-  assert.equal(concludedTurns, 1);
+  assert.equal(concludedTurns, 0);
   const sentBeforeBudget = port.sent.length;
 
   await listeners.get("agent/pre-step")(
@@ -1075,7 +1078,7 @@ test("successful find refinements cannot repeat or grow without bound on one pag
     /already succeeded.*unchanged page/iu,
   );
   assert.equal(port.sent.length, beforeRepeat);
-  assert.equal(concludedTurns, 1);
+  assert.equal(concludedTurns, 0);
 
   await listeners.get("agent/pre-step")(
     { agent, turn: 2, step: 1, signal },
@@ -1098,7 +1101,7 @@ test("successful find refinements cannot repeat or grow without bound on one pag
     /shared target-resolution budget/iu,
   );
   assert.equal(port.sent.length, beforeBudget);
-  assert.equal(concludedTurns, 2);
+  assert.equal(concludedTurns, 0);
 });
 
 test("invalidated evidence does not deduplicate a query against the prior page", async () => {
@@ -1285,12 +1288,13 @@ test("browser no-progress guards conclude through the real ToolRuntime", async (
     });
     assert.equal(port.sent.length, sentBeforeRepeat);
     assert.equal(repeated.isError, false);
-    assert.equal(repeated.concludesTurn, true);
+    assert.equal(repeated.concludesTurn, undefined);
     assert.equal(repeated.value.outcome, "no_progress");
     assert.equal(repeated.value.code, "find_repeated");
+    assert.equal(repeated.value.warning, repeated.value.message);
     assert.match(
       repeated.content[0].text,
-      /no further browser operation.*current turn/iu,
+      /blocked for the rest of this turn.*turn itself continues/iu,
     );
   } finally {
     await ctx.fiber.dispose();
@@ -1553,12 +1557,15 @@ test("an unchanged redundant snapshot concludes without replaying page content",
 
     const repeated = await executeSnapshot("browser-snapshot-2");
     assert.equal(repeated.isError, false);
-    assert.equal(repeated.concludesTurn, true);
+    // An unchanged snapshot is a soft no-progress stop: the agent turn keeps
+    // running so debugging loops can react instead of going silent.
+    assert.equal(repeated.concludesTurn, undefined);
     assertNoProgress(
       repeated.value,
       "snapshot_repeated",
       /unchanged snapshot s1/iu,
     );
+    assert.equal(repeated.value.warning, repeated.value.message);
     assert.doesNotMatch(repeated.content[0].text, /\[s1:e1\]/u);
   } finally {
     await ctx.fiber.dispose();
@@ -2263,7 +2270,7 @@ test("browser_find rejects invalid or unconstrained ordinals before IPC", () => 
   assert.equal(port.sent.length, sentBeforeOrdinalOnly);
 });
 
-test("repeated malformed browser arguments terminate the current turn", async () => {
+test("repeated malformed browser arguments are bounded within the turn", async () => {
   const port = new FakeProcessPort();
   const definitions = [];
   applyAgentBrowserTools(
@@ -2310,7 +2317,9 @@ test("repeated malformed browser arguments terminate the current turn", async ()
     "repeated_operation",
     /same non-progressing result/iu,
   );
-  assert.equal(concludedTurns, 1);
+  // find is read-only: the stop bounds the turn without concluding it.
+  assert.equal(concludedTurns, 0);
+  assert.equal(repeated.warning, repeated.message);
   assert.equal(port.sent.length, 0);
 });
 
@@ -3106,7 +3115,8 @@ test("generated locator attempts are bounded per owner session snapshot and turn
       /shared target-resolution budget/iu,
     );
     assert.equal(port.sent.length, sentBeforeBudget);
-    assert.equal(concludedTurns, 1);
+    // locate is read-only: bounded without concluding the agent turn.
+    assert.equal(concludedTurns, 0);
 
     await listeners.get("agent/pre-step")(
       { agent, turn: 2, step: 1, signal },
@@ -3150,7 +3160,8 @@ test("generated locator attempts are bounded per owner session snapshot and turn
       /already succeeded.*unchanged snapshot/iu,
     );
     assert.equal(port.sent.length, sentBeforeRepeat);
-    assert.equal(concludedTurns, 2);
+    // locate is read-only: bounded without concluding the agent turn.
+    assert.equal(concludedTurns, 0);
 
     await listeners.get("agent/pre-step")(
       { agent, turn: 3, step: 1, signal },
@@ -6146,4 +6157,178 @@ test("an ordinary missing-session response clears the focused browser session", 
     /session_id.*no focused Agent Browser session/iu,
   );
   target.cleanup();
+});
+
+test("re-reading debug evidence after page actions stays within the turn", async () => {
+  const port = new FakeProcessPort();
+  const definitions = [];
+  const ctx = {
+    effect(callback) {
+      callback();
+    },
+    tools: {
+      register(definition) {
+        definitions.push(definition);
+      },
+    },
+  };
+  applyAgentBrowserTools(ctx, { debugEnabled: true }, port);
+  const byName = (name) =>
+    definitions.find((definition) => definition.name === name);
+  let concludedTurns = 0;
+  const exec = {
+    signal: new AbortController().signal,
+    agent: { session: { id: "conversation-debug-loop" } },
+    concludeTurn() {
+      concludedTurns += 1;
+    },
+  };
+  const settle = async (toolName, args, value) => {
+    const pending = byName(toolName).execute(args, exec);
+    const request = port.sent.at(-1);
+    port.emit(
+      "message",
+      agentBrowserSuccessResponse(
+        request.requestId,
+        toolName === "browser_console"
+          ? "console"
+          : toolName === "browser_network"
+            ? "network"
+            : "execute",
+        value,
+      ),
+    );
+    return await pending;
+  };
+  const consoleValue = (lastId, count) => ({
+    ...sessionResult(),
+    enabled: true,
+    truncated: false,
+    totalCount: count,
+    lastId,
+    messages: [{
+      id: lastId,
+      level: "log",
+      source: "console",
+      text: `event ${String(lastId)}`,
+      timestamp: 1_700,
+    }],
+  });
+  const executeValue = (step) => ({
+    ...sessionResult(),
+    ok: true,
+    value: JSON.stringify({ step }),
+  });
+
+  try {
+    // The normal debug loop: action → read evidence → action → read
+    // evidence. Every read that returns new evidence must count as progress.
+    await settle("browser_console", { session_id: "browser-1" }, consoleValue(1, 1));
+    await settle(
+      "browser_execute",
+      { session_id: "browser-1", function: "() => state" },
+      executeValue(1),
+    );
+    await settle("browser_console", { session_id: "browser-1" }, consoleValue(2, 2));
+    await settle(
+      "browser_execute",
+      { session_id: "browser-1", function: "() => state" },
+      executeValue(2),
+    );
+    const fresh = await settle(
+      "browser_console",
+      { session_id: "browser-1" },
+      consoleValue(3, 3),
+    );
+    assert.equal(fresh.outcome, undefined, "new evidence is never a halt");
+
+    // Two identical reads with no new evidence are bounded, but the bound is
+    // a read-only stop: the turn keeps running and the result carries a
+    // model-visible warning.
+    const stale = {
+      ...sessionResult(),
+      enabled: true,
+      truncated: false,
+      totalCount: 0,
+      lastId: 3,
+      messages: [],
+    };
+    await settle("browser_console", { session_id: "browser-1" }, stale);
+    const halted = await settle("browser_console", { session_id: "browser-1" }, stale);
+    assert.equal(halted.outcome, "no_progress");
+    assert.equal(halted.warning, halted.message);
+    assert.equal(concludedTurns, 0);
+  } finally {
+    port.removeAllListeners();
+  }
+});
+
+test("network wait timeout is marked and rendered with recovery guidance", async () => {
+  const port = new FakeProcessPort();
+  const definitions = [];
+  applyAgentBrowserTools(
+    {
+      effect(callback) {
+        callback();
+      },
+      tools: {
+        register(definition) {
+          definitions.push(definition);
+        },
+      },
+    },
+    { debugEnabled: true },
+    port,
+  );
+  const byName = (name) =>
+    definitions.find((definition) => definition.name === name);
+  const exec = {
+    signal: new AbortController().signal,
+    agent: { session: { id: "conversation-wait-timeout" } },
+  };
+  const timedOut = {
+    ...sessionResult(),
+    enabled: true,
+    truncated: false,
+    totalCount: 0,
+    lastId: 7,
+    requests: [],
+    waitTimedOut: true,
+  };
+  const pending = byName("browser_network").execute(
+    { session_id: "browser-1", wait: true, timeout_ms: 1_000 },
+    exec,
+  );
+  const request = port.sent.at(-1);
+  port.emit(
+    "message",
+    agentBrowserSuccessResponse(request.requestId, "network", timedOut),
+  );
+  assert.deepEqual(await pending, timedOut);
+  const text = byName("browser_network").output.render(
+    {},
+    timedOut,
+  )[0].text;
+  assert.match(text, /wait deadline elapsed with no matching finished request/iu);
+  assert.match(text, /check browser_console and form validity/iu);
+  const matched = {
+    ...timedOut,
+    requests: [{
+      id: 1,
+      method: "PUT",
+      url: "https://api.local/tasks/x",
+      resourceType: "XHR",
+      outcome: "finished",
+      timestamp: 1_700,
+      status: 500,
+    }],
+  };
+  const matchedText = byName("browser_network").output.render({}, matched)[0].text;
+  assert.doesNotMatch(matchedText, /wait deadline elapsed/iu);
+  const plain = byName("browser_network").output.render(
+    {},
+    { ...timedOut, waitTimedOut: undefined },
+  )[0].text;
+  assert.doesNotMatch(plain, /wait deadline elapsed/iu);
+  port.removeAllListeners();
 });

@@ -381,6 +381,12 @@ export interface AgentBrowserNetworkResult
   readonly truncated: boolean;
   readonly totalCount: number;
   readonly lastId: number;
+  /**
+   * Present on a `wait: true` read that hit its deadline: no matching
+   * finished/failed request arrived in time and the returned slice is the
+   * current matching view.
+   */
+  readonly waitTimedOut?: boolean;
 }
 
 /**
@@ -3029,10 +3035,12 @@ export function parseAgentBrowserOperationResult(
           "totalCount",
           "lastId",
         ],
-        ["url", "title"],
+        ["url", "title", "waitTimedOut"],
       ) ||
       typeof result.enabled !== "boolean" ||
-      typeof result.truncated !== "boolean"
+      typeof result.truncated !== "boolean" ||
+      (result.waitTimedOut !== undefined &&
+        typeof result.waitTimedOut !== "boolean")
     ) {
       throw new TypeError("invalid Agent Browser network result");
     }
@@ -3061,6 +3069,9 @@ export function parseAgentBrowserOperationResult(
         "Agent Browser network last_id",
         Number.MAX_SAFE_INTEGER,
       ),
+      ...(result.waitTimedOut === undefined
+        ? {}
+        : { waitTimedOut: result.waitTimedOut === true }),
     };
   }
   if (operation === "execute") {

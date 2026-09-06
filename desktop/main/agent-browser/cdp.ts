@@ -33,6 +33,10 @@ import {
 } from "./debug.ts";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+
+type AgentBrowserNetworkWaitResult = AgentBrowserNetworkView & {
+  waitTimedOut?: boolean;
+};
 const MAX_SNAPSHOT_NODES = 300;
 const MAX_INDEX_NODES = 50_000;
 const MAX_DOM_FALLBACK_NODES = 100_000;
@@ -1266,7 +1270,7 @@ export class AgentBrowserCdp {
    * the document that just committed.
    */
   resetDebugForDocumentNavigation(): void {
-    this.#debug.clear();
+    this.#debug.clear("navigation");
     this.#debug.clearSourceMaps();
   }
 
@@ -3521,7 +3525,7 @@ export class AgentBrowserCdp {
 
   /** Empty console/network buffers without stopping capture. */
   clearDebug(): void {
-    this.#debug.clear();
+    this.#debug.clear("agent request");
   }
 
   readConsole(
@@ -3582,14 +3586,16 @@ export class AgentBrowserCdp {
     query: AgentBrowserNetworkQuery,
     timeoutMs: number,
     signal?: AbortSignal,
-  ): Promise<AgentBrowserNetworkView> {
+  ): Promise<AgentBrowserNetworkWaitResult> {
     const sinceId = query.sinceId ?? this.#debug.lastId;
     const waitQuery = { ...query, sinceId };
     const wait = this.#debug.waitForNetwork(waitQuery);
-    const timeout = new Promise<AgentBrowserNetworkView>((resolve) => {
+    const timeout = new Promise<AgentBrowserNetworkWaitResult>((resolve) => {
       const timer = setTimeout(() => {
         wait.cancel();
-        resolve(this.#debug.readNetwork(waitQuery));
+        // Mark the deadline so callers (model and run_code bindings) can
+        // distinguish "no matching request fired" from a completed wait.
+        resolve({ ...this.#debug.readNetwork(waitQuery), waitTimedOut: true });
       }, timeoutMs);
       timer.unref();
     });

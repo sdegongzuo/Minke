@@ -44,6 +44,10 @@ including injectable spawners whose fallback is `node:child_process`.
 - restores Minke's managed Node executable and bootstrap only for an explicitly recognized embedded-Node launch, including terminal and Windows ACL paths;
 - preserves upstream's `proxyEnvironmentForChild()` overlay after scrubbing, so children retain the configured proxy routing.
 
+`run-code-error-hints.patch` is pinned to the same Harness commit. It:
+
+- appends a recovery hint to `run_code` failure messages whose underlying exception is `ReferenceError: require is not defined`, so the model learns immediately that `run_code` programs have no `require()` and must use `await import("node:...")` or the injected `tools.*` bindings instead of burning steps on blind retries.
+
 The former Details layout/presentation patches remain removed at this pin.
 Harness owns adaptive conversation width, the native top-level `details` slot,
 and Harness's whole-session turn rail with deep-history load-and-jump; Minke
