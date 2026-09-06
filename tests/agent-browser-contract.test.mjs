@@ -14,6 +14,7 @@ import {
   MAX_AGENT_BROWSER_DEBUG_FUNCTION_LENGTH,
   MAX_AGENT_BROWSER_DEBUG_LIMIT,
   parseAgentBrowserOperationResult,
+  parseAgentBrowserPopoutRequest,
   parseAgentBrowserProcessRequest,
   parseAgentBrowserProcessResponse,
   parseAgentBrowserProjection,
@@ -596,6 +597,49 @@ test("automatic control claims are correlated and revision guarded", () => {
         status: "paused",
       }),
     /claim control result/u,
+  );
+});
+
+test("Agent Browser popout contracts validate sessions and hosts", () => {
+  assert.deepEqual(parseAgentBrowserPopoutRequest({ sessionId: "s1" }), {
+    sessionId: "s1",
+  });
+  assert.throws(
+    () => parseAgentBrowserPopoutRequest({ sessionId: "s1", url: "https://x" }),
+    /popout request/u,
+  );
+  assert.throws(
+    () => parseAgentBrowserPopoutRequest({ sessionId: "  " }),
+    /session id/u,
+  );
+  assert.throws(
+    () => parseAgentBrowserPopoutRequest(undefined),
+    /popout request/u,
+  );
+
+  const base = {
+    sessionId: "browser-1",
+    partition: "minke-agent-4bb22c",
+    generation: 1,
+    owner: "agent",
+    status: "pending",
+  };
+  assert.equal(parseAgentBrowserProjection(base).host, undefined);
+  assert.equal(
+    parseAgentBrowserProjection({ ...base, host: "popout" }).host,
+    "popout",
+  );
+  assert.equal(
+    parseAgentBrowserProjection({ ...base, host: "sidebar" }).host,
+    "sidebar",
+  );
+  assert.throws(
+    () => parseAgentBrowserProjection({ ...base, host: "floating" }),
+    /projection host/u,
+  );
+  assert.throws(
+    () => parseAgentBrowserProjection({ ...base, host: 1 }),
+    /projection host/u,
   );
 });
 

@@ -15,6 +15,10 @@ export const AGENT_BROWSER_NAVIGATION_CHANNEL =
   "minke:agent-browser:navigation";
 export const AGENT_BROWSER_CLOSE_CHANNEL =
   "minke:agent-browser:close";
+export const AGENT_BROWSER_POPOUT_OPEN_CHANNEL =
+  "minke:agent-browser:popout:open";
+export const AGENT_BROWSER_POPOUT_CLOSE_CHANNEL =
+  "minke:agent-browser:popout:close";
 
 export const AGENT_BROWSER_OPERATIONS = [
   "open",
@@ -72,6 +76,13 @@ export type AgentBrowserSessionStatus =
   | "paused"
   | "crashed";
 
+export const AGENT_BROWSER_PROJECTION_HOSTS = [
+  "sidebar",
+  "popout",
+] as const;
+export type AgentBrowserProjectionHost =
+  typeof AGENT_BROWSER_PROJECTION_HOSTS[number];
+
 export type AgentBrowserCursorPhase =
   | "idle"
   | "moving"
@@ -115,6 +126,8 @@ export interface AgentBrowserProjection {
   readonly generation: number;
   readonly owner: AgentBrowserOwner;
   readonly status: AgentBrowserSessionStatus;
+  /** Which registered window currently hosts this session's guest view. */
+  readonly host?: AgentBrowserProjectionHost;
   readonly navigation?: AgentBrowserNavigationState;
   readonly url?: string;
   readonly title?: string;
@@ -820,6 +833,22 @@ export function parseAgentBrowserOwnerSessionId(
   value: unknown,
 ): string {
   return parseIdentifier(value, "Agent owner session id");
+}
+
+export interface AgentBrowserPopoutRequest {
+  readonly sessionId: string;
+}
+
+export function parseAgentBrowserPopoutRequest(
+  value: unknown,
+): AgentBrowserPopoutRequest {
+  const request = record(value, "Agent Browser popout request");
+  if (!exactKeys(request, ["sessionId"])) {
+    throw new TypeError("invalid Agent Browser popout request");
+  }
+  return {
+    sessionId: parseAgentBrowserSessionId(request.sessionId),
+  };
 }
 
 export function parseAgentBrowserRef(value: unknown): string {
@@ -1811,6 +1840,22 @@ function parseOwner(value: unknown): AgentBrowserOwner {
   return value;
 }
 
+function parseProjectionHost(
+  value: unknown,
+): AgentBrowserProjectionHost {
+  if (
+    typeof value !== "string" ||
+    !AGENT_BROWSER_PROJECTION_HOSTS.includes(
+      value as AgentBrowserProjectionHost,
+    )
+  ) {
+    throw new TypeError(
+      "invalid Agent Browser projection host",
+    );
+  }
+  return value as AgentBrowserProjectionHost;
+}
+
 function parseNavigationCommand(
   value: unknown,
 ): AgentBrowserNavigationCommand {
@@ -1887,7 +1932,7 @@ export function parseAgentBrowserProjection(
         "owner",
         "status",
       ],
-      ["url", "title", "error", "cursor", "navigation"],
+      ["url", "title", "error", "cursor", "navigation", "host"],
     )
   ) {
     throw new TypeError("invalid Agent Browser projection");
@@ -1922,6 +1967,9 @@ export function parseAgentBrowserProjection(
   const navigation = projection.navigation === undefined
     ? undefined
     : parseNavigationState(projection.navigation);
+  const host = projection.host === undefined
+    ? undefined
+    : parseProjectionHost(projection.host);
   return {
     sessionId: parseAgentBrowserSessionId(projection.sessionId),
     partition,
@@ -1931,6 +1979,7 @@ export function parseAgentBrowserProjection(
     ),
     owner: parseOwner(projection.owner),
     status: parseStatus(projection.status),
+    ...(host === undefined ? {} : { host }),
     ...(navigation === undefined ? {} : { navigation }),
     ...(url === undefined ? {} : { url }),
     ...(title === undefined ? {} : { title }),
