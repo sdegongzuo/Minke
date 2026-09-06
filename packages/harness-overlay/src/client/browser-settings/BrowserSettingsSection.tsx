@@ -157,6 +157,40 @@ export function BrowserSettingsSection({
       </header>
 
       <div className="minke-browser-settings__fields">
+        <label
+          className="minke-browser-settings__field minke-browser-settings__field--toggle"
+          data-minke-browser-debug
+        >
+          <span className="minke-browser-settings__copy">
+            <span className="minke-browser-settings__label">
+              {t("browser.debug.label")}
+            </span>
+            <span
+              id="minke-browser-debug-help"
+              className="minke-browser-settings__help"
+            >
+              {t("browser.debug.help")}
+            </span>
+          </span>
+          <span className="minke-browser-settings__control minke-browser-settings__control--toggle">
+            <span className="minke-browser-settings__switch">
+              <input
+                type="checkbox"
+                checked={snapshot.settings.agentDebug}
+                disabled={!snapshot.editable}
+                aria-label={t("browser.debug.label")}
+                aria-describedby="minke-browser-debug-help"
+                onChange={(event) => {
+                  if (!snapshot.editable) return;
+                  runtime.setAgentDebug(
+                    event.currentTarget.checked,
+                  );
+                }}
+              />
+              <span aria-hidden="true" />
+            </span>
+          </span>
+        </label>
         {(
           [
             ["webUserAgent", "web"],

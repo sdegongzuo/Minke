@@ -20,6 +20,7 @@ import {
   installAgentBrowserParentLifetime,
 } from "@minke/harness-overlay/host/agent-browser-process.ts";
 import {
+  AGENT_BROWSER_DEBUG_TOOL_NAMES,
   AGENT_BROWSER_INTENT_PROMPT,
   apply as applyAgentBrowserTools,
 } from "@minke/harness-overlay/host/agent-browser-tools.ts";
@@ -3163,7 +3164,7 @@ test("generated locator attempts are bounded per owner session snapshot and turn
   }
 });
 
-test("plugin registers thirteen exclusive tools and forwards owner-scoped semantic, scroll, and wait calls", async () => {
+test("plugin registers exclusive tools and forwards owner-scoped semantic, scroll, and wait calls", async () => {
   const port = new FakeProcessPort();
   const definitions = [];
   const promptSections = [];
@@ -3205,6 +3206,9 @@ test("plugin registers thirteen exclusive tools and forwards owner-scoped semant
       "browser_scroll",
       "browser_wait",
       "browser_screenshot",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
       "browser_close",
     ],
   );
@@ -3263,6 +3267,14 @@ test("plugin registers thirteen exclusive tools and forwards owner-scoped semant
   assert.match(
     AGENT_BROWSER_INTENT_PROMPT,
     /browser_scroll.*lazy|lazy.*browser_scroll/iu,
+  );
+  assert.match(
+    AGENT_BROWSER_INTENT_PROMPT,
+    /auto-starts|enable: true.*before navigating/iu,
+  );
+  assert.match(
+    AGENT_BROWSER_INTENT_PROMPT,
+    /reload.*verify|do not rely on HMR/iu,
   );
   assert.doesNotMatch(
     AGENT_BROWSER_INTENT_PROMPT,
@@ -4014,6 +4026,315 @@ test("browser_screenshot stores a durable model-visible image", async () => {
   );
 });
 
+test("debug tools parse arguments, execute, and render console/network/execute results", async () => {
+  const port = new FakeProcessPort();
+  const definitions = [];
+  const ctx = {
+    effect(callback) {
+      callback();
+    },
+    tools: {
+      register(definition) {
+        definitions.push(definition);
+      },
+    },
+  };
+  applyAgentBrowserTools(ctx, { debugEnabled: true }, port);
+  const byName = (name) =>
+    definitions.find((definition) => definition.name === name);
+  const exec = {
+    signal: new AbortController().signal,
+    agent: { session: { id: "conversation-debug" } },
+  };
+
+  const consoleValue = {
+    ...sessionResult(),
+    enabled: true,
+    truncated: false,
+    totalCount: 1,
+    lastId: 1,
+    messages: [{
+      id: 1,
+      level: "error",
+      source: "console",
+      text: "boom",
+      timestamp: 1_700,
+      url: "https://app.local/main.ts",
+      line: 12,
+      column: 4,
+    }],
+  };
+  const consolePending = byName("browser_console").execute(
+    { session_id: "browser-1", enable: true, levels: ["error"] },
+    exec,
+  );
+  const consoleRequest = port.sent.at(-1);
+  assert.equal(consoleRequest.operation, "console");
+  assert.deepEqual(consoleRequest.payload, {
+    sessionId: "browser-1",
+    levels: ["error"],
+    enable: true,
+  });
+  port.emit(
+    "message",
+    agentBrowserSuccessResponse(
+      consoleRequest.requestId,
+      "console",
+      consoleValue,
+    ),
+  );
+  assert.deepEqual(await consolePending, consoleValue);
+  const consoleText = byName("browser_console").output.render(
+    {},
+    consoleValue,
+  )[0].text;
+  assert.match(consoleText, /\[error\] \[console\] boom \(https:\/\/app\.local\/main\.ts:12:4\)/u);
+  assert.match(consoleText, /Capture: enabled/u);
+  assert.match(consoleText, /last_id: 1/u);
+
+  const consoleDetailPending = byName("browser_console").execute(
+    { session_id: "browser-1", id: 1, since_id: 0 },
+    exec,
+  );
+  const consoleDetailRequest = port.sent.at(-1);
+  assert.deepEqual(consoleDetailRequest.payload, {
+    sessionId: "browser-1",
+    id: 1,
+    sinceId: 0,
+  });
+  port.emit(
+    "message",
+    agentBrowserSuccessResponse(
+      consoleDetailRequest.requestId,
+      "console",
+      consoleValue,
+    ),
+  );
+  await consoleDetailPending;
+
+  const networkValue = {
+    ...sessionResult(),
+    enabled: true,
+    truncated: true,
+    totalCount: 2,
+    lastId: 2,
+    requests: [{
+      id: 1,
+      method: "GET",
+      url: "https://api.local/data",
+      resourceType: "XHR",
+      outcome: "finished",
+      timestamp: 1_700,
+      status: 200,
+      statusText: "OK",
+      durationMs: 42,
+    }],
+  };
+  const networkPending = byName("browser_network").execute(
+    {
+      session_id: "browser-1",
+      resource_types: ["XHR", "Fetch"],
+      failures_only: true,
+      url_contains: "/data",
+      since_id: 0,
+      wait: true,
+      timeout_ms: 5_000,
+    },
+    exec,
+  );
+  const networkRequest = port.sent.at(-1);
+  assert.equal(networkRequest.operation, "network");
+  assert.deepEqual(networkRequest.payload, {
+    sessionId: "browser-1",
+    resourceTypes: ["XHR", "Fetch"],
+    failuresOnly: true,
+    urlContains: "/data",
+    sinceId: 0,
+    wait: true,
+    timeoutMs: 5_000,
+  });
+  port.emit(
+    "message",
+    agentBrowserSuccessResponse(
+      networkRequest.requestId,
+      "network",
+      networkValue,
+    ),
+  );
+  assert.deepEqual(await networkPending, networkValue);
+  const networkText = byName("browser_network").output.render(
+    {},
+    networkValue,
+  )[0].text;
+  assert.match(
+    networkText,
+    /\[XHR\] GET 200 OK https:\/\/api\.local\/data 42ms/u,
+  );
+  assert.match(networkText, /Capture: enabled/u);
+  assert.match(networkText, /dropped the oldest entries/u);
+
+  const executeValue = {
+    ...sessionResult(),
+    ok: true,
+    value: "{\"n\":1}",
+  };
+  const executePending = byName("browser_execute").execute(
+    {
+      session_id: "browser-1",
+      function: "(el) => el.tagName",
+      args: [{ ref: "s1:e1" }],
+    },
+    exec,
+  );
+  const executeRequest = port.sent.at(-1);
+  assert.equal(executeRequest.operation, "execute");
+  assert.equal(
+    executeRequest.payload.function,
+    "(el) => el.tagName",
+  );
+  assert.deepEqual(executeRequest.payload.args, [{ ref: "s1:e1" }]);
+  port.emit(
+    "message",
+    agentBrowserSuccessResponse(
+      executeRequest.requestId,
+      "execute",
+      executeValue,
+    ),
+  );
+  assert.deepEqual(await executePending, executeValue);
+  const executeText = byName("browser_execute").output.render(
+    {},
+    executeValue,
+  )[0].text;
+  assert.match(executeText, /Executed function/u);
+  assert.match(executeText, /Value: \{"n":1\}/u);
+
+  const executeError = {
+    ...sessionResult(),
+    ok: false,
+    errorText: "TypeError: x is not a function",
+  };
+  const errorText = byName("browser_execute").output.render(
+    {},
+    executeError,
+  )[0].text;
+  assert.match(errorText, /Function execution failed/u);
+  assert.match(errorText, /Error: TypeError: x is not a function/u);
+});
+
+test("debug tools stay denied until the durable debug setting is on", async () => {
+  const port = new FakeProcessPort();
+  const definitions = [];
+  const listeners = new Map();
+  const restrictions = [];
+  applyAgentBrowserTools(
+    {
+      effect(callback) {
+        callback();
+      },
+      on(event, listener) {
+        listeners.set(event, listener);
+      },
+      tools: {
+        register(definition) {
+          definitions.push(definition);
+        },
+      },
+    },
+    {},
+    port,
+  );
+  const agent = {
+    session: { id: "conversation-debug-gate" },
+    cancel() {},
+    ctx: {
+      tools: {
+        restrict(filter) {
+          const entry = { filter, lifted: false };
+          restrictions.push(entry);
+          return () => {
+            entry.lifted = true;
+          };
+        },
+      },
+    },
+  };
+  listeners.get("agent/created")({ agent });
+  assert.equal(
+    AGENT_BROWSER_DEBUG_TOOL_NAMES.every((name) =>
+      restrictions[0].filter.deny.includes(name)
+    ),
+    true,
+  );
+  const exec = {
+    signal: new AbortController().signal,
+    agent,
+  };
+  const consoleTool = definitions.find(
+    (definition) => definition.name === "browser_console",
+  );
+  await assert.rejects(
+    async () =>
+      consoleTool.execute({ session_id: "browser-1" }, exec),
+    (error) => {
+      assert.equal(error instanceof AgentBrowserProcessError, true);
+      assert.equal(error.remoteCode, "debug_mode_required");
+      assert.match(error.message, /Browser settings/u);
+      return true;
+    },
+  );
+  assert.equal(port.sent.length, 0);
+
+  const enabledPort = new FakeProcessPort();
+  const enabledDefinitions = [];
+  const enabledRestrictions = [];
+  const enabledListeners = new Map();
+  applyAgentBrowserTools(
+    {
+      effect(callback) {
+        callback();
+      },
+      on(event, listener) {
+        enabledListeners.set(event, listener);
+      },
+      tools: {
+        register(definition) {
+          enabledDefinitions.push(definition);
+        },
+      },
+    },
+    { debugEnabled: true },
+    enabledPort,
+  );
+  const enabledAgent = {
+    session: { id: "conversation-debug-on" },
+    cancel() {},
+    ctx: {
+      tools: {
+        restrict(filter) {
+          enabledRestrictions.push(filter);
+          return () => {};
+        },
+      },
+    },
+  };
+  enabledListeners.get("agent/created")({ agent: enabledAgent });
+  assert.equal(
+    enabledRestrictions.every((filter) =>
+      AGENT_BROWSER_DEBUG_TOOL_NAMES.every(
+        (name) => filter.deny?.includes(name) !== true,
+      )
+    ),
+    true,
+  );
+  assert.equal(
+    enabledDefinitions.some((definition) =>
+      definition.name === "browser_console"
+    ),
+    true,
+  );
+});
+
 test("browser work uses two stable deny-only catalogs and restores bootstrap when idle", async () => {
   const port = new FakeProcessPort();
   const definitions = [];
@@ -4076,6 +4397,9 @@ test("browser work uses two stable deny-only catalogs and restores bootstrap whe
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   }]);
 
@@ -4092,9 +4416,16 @@ test("browser work uses two stable deny-only catalogs and restores bootstrap whe
   assert.equal(restrictions[0].lifted, true);
   assert.equal(
     restrictions.length,
-    1,
-    "activating browser work should lift bootstrap without replacing the mixed tool catalog",
+    2,
+    "activating browser work should lift mutation deny without exposing debug tools",
   );
+  assert.deepEqual(restrictions.at(-1).filter, {
+    deny: [
+      "browser_console",
+      "browser_network",
+      "browser_execute",
+    ],
+  });
   assert.equal(
     promptSections[0].text({ scope: agent }),
     AGENT_BROWSER_INTENT_PROMPT,
@@ -4143,7 +4474,7 @@ test("browser work uses two stable deny-only catalogs and restores bootstrap whe
   await snapshot;
   assert.equal(
     restrictions.length,
-    1,
+    2,
     "fresh evidence changes execution permission, not the model-facing catalog",
   );
   assert.ok(
@@ -4162,12 +4493,15 @@ test("browser work uses two stable deny-only catalogs and restores bootstrap whe
     promptSections[0].text({ scope: agent }),
     /Bind an ordinal/iu,
   );
-  assert.equal(restrictions.length, 2);
+  assert.equal(restrictions.length, 3);
   assert.deepEqual(restrictions.at(-1).filter, {
     deny: [
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   });
 
@@ -4372,7 +4706,7 @@ test("action evidence cannot authorize a hidden sibling call and zero-match find
   assert.equal(port.sent.length, sentBeforeRevokedAction);
   assert.equal(
     restrictions.length,
-    1,
+    2,
     "evidence changes must not churn the active catalog",
   );
 });
@@ -4432,6 +4766,9 @@ test("minimal preset switches stay restricted and disposal releases the owner", 
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   }]);
 
@@ -4454,6 +4791,9 @@ test("minimal preset switches stay restricted and disposal releases the owner", 
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   });
   assert.equal(restrictions.at(-2).lifted, true);
@@ -4568,6 +4908,9 @@ test("human takeover stops the active turn and return requires a fresh observati
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   });
 
@@ -4614,6 +4957,9 @@ test("human takeover stops the active turn and return requires a fresh observati
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   });
   const forwardedBeforeRecovery = port.sent.length;
@@ -5114,6 +5460,9 @@ test("an idle human takeover does not trap the next non-browser turn in a browse
       "browser_click",
       "browser_fill",
       "browser_press",
+      "browser_console",
+      "browser_network",
+      "browser_execute",
     ],
   });
 });

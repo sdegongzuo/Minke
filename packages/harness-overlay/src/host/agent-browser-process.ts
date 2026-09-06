@@ -175,6 +175,8 @@ function knownRecoveryAdvice(code: string): string | undefined {
       return "Do not repeat the unavailable history action. Use the projected history state or choose another navigation action.";
     case "unsupported_key":
       return "Do not repeat the unsupported key. Choose one of the keys documented by browser_press.";
+    case "debug_mode_required":
+      return "Do not retry debug tools. Ask the user to enable Agent debug in Browser settings.";
     default:
       return undefined;
   }

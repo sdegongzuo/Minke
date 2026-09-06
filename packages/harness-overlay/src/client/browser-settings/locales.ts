@@ -13,6 +13,9 @@ export const browserSettingsZh = {
     "用于 Agent 创建和控制的临时浏览器会话。新的浏览会话会使用更新后的标识。",
   "browser.editHint":
     "修改后，离开输入框即自动保存；⌘/Ctrl + Enter 也可立即保存，换行会折叠为空格。",
+  "browser.debug.label": "Agent 调试工具",
+  "browser.debug.help":
+    "开启后，Agent 可以使用 console、network 和受限 execute 调试你自己的前端页面。默认关闭。新的 Harness 会话会读到这个设置。",
   "browser.reset": "恢复推荐 UA",
   "browser.validation":
     "请输入不超过 512 个字符、仅包含可见 ASCII 字符的 User-Agent。",
@@ -49,6 +52,9 @@ export const browserSettingsEn: Record<
     "Used by temporary browser sessions created and controlled by an Agent. New sessions use the updated identity.",
   "browser.editHint":
     "Changes save automatically when you leave the field; press Command/Ctrl + Enter to save immediately. Line breaks are folded into spaces.",
+  "browser.debug.label": "Agent debug tools",
+  "browser.debug.help":
+    "When on, the Agent can use console, network, and restricted execute to debug your own frontend pages. Off by default. New Harness sessions pick up this setting.",
   "browser.reset": "Restore recommended UA",
   "browser.validation":
     "Enter a User-Agent with no more than 512 visible ASCII characters.",

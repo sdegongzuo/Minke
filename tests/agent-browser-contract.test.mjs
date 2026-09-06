@@ -10,11 +10,15 @@ import {
   isAgentBrowserProcessMessage,
   parseAgentBrowserControlChangedEvent,
   parseAgentBrowserNavigationRequest,
+  MAX_AGENT_BROWSER_DEBUG_ARGS,
+  MAX_AGENT_BROWSER_DEBUG_FUNCTION_LENGTH,
+  MAX_AGENT_BROWSER_DEBUG_LIMIT,
   parseAgentBrowserOperationResult,
   parseAgentBrowserProcessRequest,
   parseAgentBrowserProcessResponse,
   parseAgentBrowserProjection,
   parseAgentBrowserProjections,
+  parseAgentBrowserToolPayload,
 } from "@minke/harness-overlay/agent-browser-contract.ts";
 import {
   AGENT_BROWSER_HISTORY_DEFAULT_LIMIT,
@@ -1071,3 +1075,266 @@ test("Agent Browser find requests and paged local results are strict", () => {
     /depth/u,
   );
 });
+
+test("Agent Browser debug payloads reject unknown keys, bad types, and over-limit values", () => {
+  const sessionId = "browser-1";
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("console", {
+      sessionId,
+      levels: ["error", "warn"],
+      limit: 20,
+      enable: true,
+    }),
+    {
+      sessionId,
+      levels: ["error", "warn"],
+      limit: 20,
+      enable: true,
+    },
+  );
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("console", {
+      sessionId,
+      clear: true,
+    }),
+    { sessionId, clear: true },
+  );
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("console", {
+      sessionId,
+      id: 7,
+      sinceId: 3,
+    }),
+    { sessionId, id: 7, sinceId: 3 },
+  );
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("network", {
+      sessionId,
+      resourceTypes: ["XHR", "Fetch", "Document"],
+      failuresOnly: true,
+      enable: false,
+    }),
+    {
+      sessionId,
+      resourceTypes: ["XHR", "Fetch", "Document"],
+      failuresOnly: true,
+      enable: false,
+    },
+  );
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("network", {
+      sessionId,
+      id: 4,
+      sinceId: 2,
+      urlContains: "/api",
+      wait: true,
+      timeoutMs: 5_000,
+    }),
+    {
+      sessionId,
+      id: 4,
+      sinceId: 2,
+      urlContains: "/api",
+      wait: true,
+      timeoutMs: 5_000,
+    },
+  );
+  assert.deepEqual(
+    parseAgentBrowserToolPayload("execute", {
+      sessionId,
+      function: "() => window.__APP_STATE__",
+      args: [{ id: 1 }],
+      awaitPromise: false,
+    }),
+    {
+      sessionId,
+      function: "() => window.__APP_STATE__",
+      args: [{ id: 1 }],
+      awaitPromise: false,
+    },
+  );
+
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("console", {
+        sessionId,
+        extra: true,
+      }),
+    /invalid Agent Browser console payload/u,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("network", {
+        sessionId,
+        failuresOnly: "yes",
+      }),
+    /failuresOnly/u,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("console", {
+        sessionId,
+        limit: MAX_AGENT_BROWSER_DEBUG_LIMIT + 1,
+      }),
+    /limit/u,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("execute", {
+        sessionId,
+      }),
+    /invalid Agent Browser execute payload/u,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("execute", {
+        sessionId,
+        function: "x".repeat(MAX_AGENT_BROWSER_DEBUG_FUNCTION_LENGTH + 1),
+      }),
+    /function/u,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserToolPayload("execute", {
+        sessionId,
+        function: "() => 1",
+        args: Array.from(
+          { length: MAX_AGENT_BROWSER_DEBUG_ARGS + 1 },
+          (_, index) => index,
+        ),
+      }),
+    /args/u,
+  );
+});
+
+test("Agent Browser debug results require the documented fields and reject extras", () => {
+  const session = {
+    sessionId: "browser-1",
+    generation: 2,
+    owner: "agent",
+    status: "ready",
+    snapshotRequired: false,
+  };
+  const consoleResult = {
+    ...session,
+    enabled: true,
+    truncated: false,
+    totalCount: 1,
+    lastId: 1,
+    messages: [{
+      id: 1,
+      level: "error",
+      source: "console",
+      text: "boom",
+      timestamp: 1_700,
+      url: "https://app.local/main.ts",
+      line: 12,
+      column: 4,
+    }],
+  };
+  assert.deepEqual(
+    parseAgentBrowserOperationResult("console", consoleResult),
+    consoleResult,
+  );
+  const consoleDetail = {
+    ...consoleResult,
+    messages: [{
+      ...consoleResult.messages[0],
+      args: [
+        "boom",
+        { type: "object", className: "Object", preview: { n: 1 } },
+      ],
+      stack: [
+        { url: "https://app.local/src/app.ts", line: 10, column: 4, functionName: "fail" },
+        { url: "https://app.local/vendor.js", line: 3, column: 1 },
+      ],
+    }],
+  };
+  assert.deepEqual(
+    parseAgentBrowserOperationResult("console", consoleDetail),
+    consoleDetail,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserOperationResult("console", {
+        ...consoleResult,
+        extra: true,
+      }),
+    /invalid Agent Browser console result/u,
+  );
+
+  const networkResult = {
+    ...session,
+    enabled: true,
+    truncated: false,
+    totalCount: 1,
+    lastId: 1,
+    requests: [{
+      id: 1,
+      method: "GET",
+      url: "https://api.local/data",
+      resourceType: "XHR",
+      outcome: "finished",
+      timestamp: 1_700,
+      status: 200,
+      statusText: "OK",
+      durationMs: 42,
+    }],
+  };
+  assert.deepEqual(
+    parseAgentBrowserOperationResult("network", networkResult),
+    networkResult,
+  );
+  const networkDetail = {
+    ...networkResult,
+    requests: [{
+      ...networkResult.requests[0],
+      requestHeaders: {
+        Cookie: "[redacted]",
+        Authorization: "[redacted]",
+        Accept: "application/json",
+      },
+      responseHeaders: { "Content-Type": "application/json" },
+      requestBody: "{\"name\":\"\"}",
+      body: "{\"ok\":true}",
+      initiator: {
+        url: "https://app.local/src/api.ts",
+        line: 4,
+        column: 2,
+        functionName: "load",
+      },
+      blockedReason: "csp",
+    }],
+  };
+  assert.deepEqual(
+    parseAgentBrowserOperationResult("network", networkDetail),
+    networkDetail,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserOperationResult("network", {
+        ...networkResult,
+        enabled: "yes",
+      }),
+    /invalid Agent Browser network result/u,
+  );
+
+  const executeResult = {
+    ...session,
+    ok: true,
+    value: "{\"n\":1}",
+  };
+  assert.deepEqual(
+    parseAgentBrowserOperationResult("execute", executeResult),
+    executeResult,
+  );
+  assert.throws(
+    () =>
+      parseAgentBrowserOperationResult("execute", {
+        ...session,
+        ok: true,
+      }),
+    /exactly one of value or errorText/u,
+  );
+});
+

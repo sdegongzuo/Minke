@@ -5,6 +5,10 @@ export const BROWSER_SETTINGS_WRITE_CHANNEL =
 
 export const BROWSER_USER_AGENT_MAX_LENGTH = 512;
 
+/** Harness child env: `"1"` exposes Agent Browser debug tools. */
+export const MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV =
+  "MINKE_AGENT_BROWSER_DEBUG_ENABLED";
+
 export interface BrowserSettings {
   /**
    * Empty means: derive a reduced Chrome UA from the embedded Chromium
@@ -12,12 +16,19 @@ export interface BrowserSettings {
    */
   webUserAgent: string;
   agentUserAgent: string;
+  /**
+   * When false (the default), Agent Browser debug tools stay hidden from
+   * the agent catalog. Existing documents omit this key; parse treats that
+   * as false.
+   */
+  agentDebug: boolean;
 }
 
 export const DEFAULT_BROWSER_SETTINGS: Readonly<BrowserSettings> =
   Object.freeze({
     webUserAgent: "",
     agentUserAgent: "",
+    agentDebug: false,
   });
 
 const USER_AGENT_PRODUCT_TOKEN =
@@ -78,11 +89,23 @@ export function parseBrowserSettings(value: unknown): BrowserSettings {
     throw new TypeError("invalid browser settings");
   }
   const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
   if (
-    Object.keys(record).length !== 2 ||
     !Object.hasOwn(record, "webUserAgent") ||
-    !Object.hasOwn(record, "agentUserAgent")
+    !Object.hasOwn(record, "agentUserAgent") ||
+    keys.some(
+      (key) =>
+        key !== "webUserAgent" &&
+        key !== "agentUserAgent" &&
+        key !== "agentDebug",
+    )
   ) {
+    throw new TypeError("invalid browser settings");
+  }
+  const agentDebug = record.agentDebug === undefined
+    ? false
+    : record.agentDebug;
+  if (typeof agentDebug !== "boolean") {
     throw new TypeError("invalid browser settings");
   }
   return {
@@ -94,5 +117,6 @@ export function parseBrowserSettings(value: unknown): BrowserSettings {
       record.agentUserAgent,
       "agent",
     ),
+    agentDebug,
   };
 }

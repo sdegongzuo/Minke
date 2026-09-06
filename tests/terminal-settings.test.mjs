@@ -358,6 +358,7 @@ test("the desktop store writes Terminal settings into Minke config", async () =>
     browser: {
       webUserAgent: "",
       agentUserAgent: "",
+      agentDebug: false,
     },
   });
   assertDefaultRemoteSettings(remote);

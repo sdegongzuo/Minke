@@ -11,6 +11,8 @@ import {
   createAgentBrowserClaimControlRequest,
   createAgentBrowserReleaseOwnerRequest,
   createAgentBrowserRequest,
+  MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
+  agentBrowserSuccessResponse,
 } from "@minke/harness-overlay/agent-browser-contract.ts";
 import {
   AGENT_BROWSER_HISTORY_CLEAR_CHANNEL,
@@ -28,6 +30,11 @@ import {
   AgentBrowserProcessChannel,
   AgentBrowserRuntime,
 } from "@minke/desktop/main/agent-browser/index.ts";
+import {
+  DEBUG_EXECUTE_WRAPPER_FUNCTION,
+  DEBUG_TRUNCATION_SUFFIX,
+  DEFAULT_HIDDEN_NETWORK_RESOURCE_TYPES,
+} from "@minke/desktop/main/agent-browser/debug.ts";
 
 async function settleAsyncWork() {
   await new Promise((resolve) => setImmediate(resolve));
@@ -71,6 +78,19 @@ class FakeDebugger extends EventEmitter {
     }],
   };
   generatedLocatorBackendNodeId = 7;
+  debugEvaluateResult = {
+    type: "function",
+    objectId: "debug-fn-1",
+  };
+  debugEvaluateException = undefined;
+  debugExecuteCallResult = {
+    result: {
+      value: { ok: true, value: "{\"n\":1}" },
+    },
+  };
+  sourceMapContents = new Map();
+  networkBodies = new Map();
+  networkPostData = new Map();
   scrollResult = {
     beforeX: 0,
     beforeY: 0,
@@ -241,8 +261,26 @@ class FakeDebugger extends EventEmitter {
       case "Page.getLayoutMetrics":
         return this.layoutMetrics;
       case "Runtime.evaluate":
+        if (
+          params.returnByValue === false &&
+          typeof params.expression === "string" &&
+          params.expression.startsWith("(") &&
+          params.contextId === undefined
+        ) {
+          if (this.debugEvaluateException !== undefined) {
+            return { exceptionDetails: this.debugEvaluateException };
+          }
+          return { result: this.debugEvaluateResult };
+        }
         return { result: { objectId: "document-1" } };
       case "Runtime.callFunctionOn":
+        if (
+          String(params.functionDeclaration).includes(
+            "Return value is not JSON-serializable",
+          )
+        ) {
+          return this.debugExecuteCallResult;
+        }
         if (
           String(params.functionDeclaration).includes(
             "minkeScroll",
@@ -359,6 +397,40 @@ class FakeDebugger extends EventEmitter {
         return { result: [] };
       case "Page.captureScreenshot":
         return { data: "aGVsbG8=" };
+      case "Page.getResourceContent": {
+        const content = this.sourceMapContents.get(params.url);
+        if (content === undefined) {
+          throw new Error(`source map missing: ${params.url}`);
+        }
+        return { content, base64Encoded: false };
+      }
+      case "Network.getResponseBody": {
+        const body = this.networkBodies.get(params.requestId);
+        if (body === undefined) {
+          throw new Error(`response body missing: ${params.requestId}`);
+        }
+        return body;
+      }
+      case "Network.getRequestPostData": {
+        const postData = this.networkPostData.get(params.requestId);
+        if (postData === undefined) {
+          throw new Error(`post data missing: ${params.requestId}`);
+        }
+        return { postData };
+      }
+      case "Network.loadNetworkResource": {
+        const content = this.sourceMapContents.get(params.url);
+        if (content === undefined) {
+          return { resource: { success: false } };
+        }
+        return {
+          resource: {
+            success: true,
+            httpStatusCode: 200,
+            content,
+          },
+        };
+      }
       default:
         return {};
     }
@@ -507,6 +579,7 @@ function runtimeFixture(options = {}) {
     guestAttachTimeoutMs: 250,
     cdpCommandTimeoutMs: options.cdpCommandTimeoutMs ?? 250,
     history: options.history,
+    autoEnableDebug: options.autoEnableDebug,
   });
   const ipc = new FakeIpc();
   const embedder = new FakeEmbedder();
@@ -5140,3 +5213,1149 @@ test("persistent or wrongly hosted guests fail closed", async () => {
   wrongHost.binding.dispose();
   wrongHost.runtime.dispose();
 });
+
+function emitCdp(guest, method, params) {
+  guest.debugger.emit("message", {}, method, params);
+}
+
+function commandCount(guest, method) {
+  return guest.debugger.commands.filter(
+    (entry) => entry.method === method,
+  ).length;
+}
+
+test("omit-to-read does not start capture; execute enables without a prior enable:true", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+
+  assert.equal(commandCount(opened.guest, "Log.enable"), 0);
+  const unread = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(unread.enabled, false);
+  assert.equal(commandCount(opened.guest, "Log.enable"), 0);
+  assert.equal(commandCount(opened.guest, "Network.enable"), 0);
+
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "ignored" }],
+  });
+  const stillOff = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.deepEqual(stillOff.messages, []);
+  assert.equal(stillOff.enabled, false);
+
+  const executed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "execute",
+      { sessionId, function: "() => 1" },
+    ),
+    signal,
+  );
+  assert.equal(executed.ok, true);
+  assert.equal(commandCount(opened.guest, "Log.enable"), 1);
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "after execute enable" }],
+  });
+  const afterExecute = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterExecute.enabled, true);
+  assert.equal(afterExecute.messages[0].text, "after execute enable");
+  assert.equal(typeof afterExecute.lastId, "number");
+  assert.ok(afterExecute.lastId >= afterExecute.messages[0].id);
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("debug capture enable/read/disable and restricted execute go through CDP", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+
+  const enabled = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  assert.equal(enabled.enabled, true);
+  assert.equal(commandCount(opened.guest, "Log.enable"), 1);
+  assert.equal(commandCount(opened.guest, "Network.enable"), 1);
+
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "network",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  assert.equal(
+    commandCount(opened.guest, "Log.enable"),
+    1,
+    "enableDebug is idempotent",
+  );
+
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "boom" }],
+    stackTrace: {
+      callFrames: [{
+        url: "https://app.local/main.ts",
+        lineNumber: 12,
+        columnNumber: 4,
+      }],
+    },
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "doc",
+    type: "Document",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/" },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "doc",
+    response: { status: 200, statusText: "OK" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "doc",
+    timestamp: 1.01,
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "mod",
+    type: "Script",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/src/main.ts" },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "mod",
+    response: { status: 200, statusText: "OK" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "mod",
+    timestamp: 1.02,
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "css",
+    type: "Stylesheet",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/src/app.css" },
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "api",
+    type: "XHR",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/api" },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "api",
+    response: { status: 200, statusText: "OK" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "api",
+    timestamp: 1.042,
+  });
+
+  const consoleView = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(consoleView.messages.length, 1);
+  assert.equal(consoleView.messages[0].text, "boom");
+  assert.equal(consoleView.messages[0].level, "error");
+
+  const networkView = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.deepEqual(
+    networkView.requests.map((request) => request.resourceType),
+    ["Document", "XHR"],
+  );
+  assert.equal(
+    networkView.requests.some((request) =>
+      DEFAULT_HIDDEN_NETWORK_RESOURCE_TYPES.includes(
+        request.resourceType.toLowerCase(),
+      )
+    ),
+    false,
+  );
+  const scripts = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      6,
+      "conversation-1",
+      "network",
+      { sessionId, resourceTypes: ["Script"] },
+    ),
+    signal,
+  );
+  assert.deepEqual(
+    scripts.requests.map((request) => request.url),
+    ["https://app.local/src/main.ts"],
+  );
+
+  const executed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      7,
+      "conversation-1",
+      "execute",
+      {
+        sessionId,
+        function: "() => window.__APP_STATE__",
+        args: [1],
+      },
+    ),
+    signal,
+  );
+  assert.equal(executed.ok, true);
+  assert.equal(executed.value, "{\"n\":1}");
+  const evaluate = opened.guest.debugger.commands.find((entry) =>
+    entry.method === "Runtime.evaluate" &&
+      entry.params.expression === "(() => window.__APP_STATE__)"
+  );
+  assert.notEqual(evaluate, undefined);
+  assert.equal(evaluate.params.returnByValue, false);
+  const call = opened.guest.debugger.commands.find((entry) =>
+    entry.method === "Runtime.callFunctionOn" &&
+      entry.params.functionDeclaration === DEBUG_EXECUTE_WRAPPER_FUNCTION
+  );
+  assert.notEqual(call, undefined);
+  assert.equal(call.params.objectId, "debug-fn-1");
+  assert.equal(call.params.returnByValue, true);
+  assert.deepEqual(call.params.arguments, [
+    { value: true },
+    { value: 1 },
+  ]);
+
+  emitCdp(opened.guest, "Page.frameNavigated", {
+    frame: { id: "main-frame" },
+  });
+  const afterNav = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      8,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterNav.enabled, true);
+  assert.deepEqual(afterNav.messages, []);
+
+  const disabled = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      9,
+      "conversation-1",
+      "console",
+      { sessionId, enable: false },
+    ),
+    signal,
+  );
+  assert.equal(disabled.enabled, false);
+  assert.equal(commandCount(opened.guest, "Log.disable"), 1);
+  assert.equal(commandCount(opened.guest, "Network.disable"), 1);
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "after disable" }],
+  });
+  const afterDisable = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      10,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.deepEqual(afterDisable.messages, []);
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("restricted execute truncates oversized values inside the contract cap", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  const oversized = "V".repeat(MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH + 40);
+  opened.guest.debugger.debugExecuteCallResult = {
+    result: {
+      value: { ok: true, value: oversized },
+    },
+  };
+  const executed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "execute",
+      { sessionId, function: "() => window.__HUGE__" },
+    ),
+    signal,
+  );
+  assert.equal(executed.ok, true);
+  assert.equal(executed.value.length, MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH);
+  assert.equal(executed.value.endsWith(DEBUG_TRUNCATION_SUFFIX), true);
+  assert.doesNotThrow(() =>
+    agentBrowserSuccessResponse(4, "execute", executed)
+  );
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+function encodeVlq(value) {
+  let vlq = value < 0 ? ((-value) << 1) | 1 : value << 1;
+  let encoded = "";
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  do {
+    let digit = vlq & 31;
+    vlq >>>= 5;
+    if (vlq > 0) digit |= 32;
+    encoded += alphabet[digit];
+  } while (vlq > 0);
+  return encoded;
+}
+
+test("debug clear empties buffers while capture stays enabled", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  assert.ok(
+    opened.guest.debugger.commands.some(
+      (entry) => entry.method === "Debugger.enable",
+    ),
+  );
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "stale" }],
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "stale",
+    type: "XHR",
+    request: { method: "GET", url: "https://api.local/stale" },
+  });
+  const cleared = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "console",
+      { sessionId, clear: true },
+    ),
+    signal,
+  );
+  assert.equal(cleared.enabled, true);
+  assert.deepEqual(cleared.messages, []);
+  const networkCleared = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(networkCleared.enabled, true);
+  assert.deepEqual(networkCleared.requests, []);
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "log",
+    args: [{ type: "string", value: "fresh" }],
+  });
+  const after = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(after.messages[0].text, "fresh");
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("runtime console remap uses Debugger.scriptParsed source maps", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  const originalUrl = "https://app.local/src/app.ts";
+  const generatedUrl = "https://app.local/bundle.js";
+  const map = {
+    version: 3,
+    sources: [originalUrl],
+    mappings:
+      encodeVlq(42) + encodeVlq(0) + encodeVlq(10) + encodeVlq(4),
+  };
+  emitCdp(opened.guest, "Debugger.scriptParsed", {
+    url: generatedUrl,
+    sourceMapURL:
+      "data:application/json;base64," +
+      Buffer.from(JSON.stringify(map), "utf8").toString("base64"),
+  });
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "mapped" }],
+    stackTrace: {
+      callFrames: [{
+        url: generatedUrl,
+        lineNumber: 0,
+        columnNumber: 42,
+      }],
+    },
+  });
+  const view = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(view.messages[0].url, originalUrl);
+  assert.equal(view.messages[0].line, 10);
+  assert.equal(view.messages[0].column, 4);
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("session auto-enable records load-time events without a preceding enable:true", async () => {
+  const target = runtimeFixture({ autoEnableDebug: true });
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  assert.ok(commandCount(opened.guest, "Log.enable") >= 1);
+  assert.ok(commandCount(opened.guest, "Network.enable") >= 1);
+
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [{ type: "string", value: "load boom" }],
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "boot",
+    type: "XHR",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/boot.json" },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "boot",
+    response: {
+      status: 200,
+      statusText: "OK",
+      mimeType: "application/json",
+    },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "boot",
+    timestamp: 1.01,
+  });
+
+  const consoleView = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(consoleView.enabled, true);
+  assert.equal(consoleView.messages[0].text, "load boom");
+
+  const networkView = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(networkView.requests[0].url, "https://app.local/boot.json");
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("load-time console and network rows survive navigate completion and a later snapshot", async () => {
+  const target = runtimeFixture({ autoEnableDebug: true });
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  assert.ok(commandCount(opened.guest, "Log.enable") >= 1);
+
+  opened.guest.debugger.afterNext("Page.navigate", () => {
+    emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+      type: "error",
+      args: [{ type: "string", value: "load boom" }],
+    });
+    emitCdp(opened.guest, "Network.requestWillBeSent", {
+      requestId: "boot",
+      type: "XHR",
+      timestamp: 1,
+      request: { method: "GET", url: "https://app.local/boot.json" },
+    });
+    emitCdp(opened.guest, "Network.responseReceived", {
+      requestId: "boot",
+      response: {
+        status: 200,
+        statusText: "OK",
+        mimeType: "application/json",
+      },
+    });
+    emitCdp(opened.guest, "Network.loadingFinished", {
+      requestId: "boot",
+      timestamp: 1.01,
+    });
+  });
+
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "navigate",
+      { sessionId, url: "https://app.local/" },
+    ),
+    signal,
+  );
+
+  const afterNavigateConsole = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterNavigateConsole.enabled, true);
+  assert.equal(afterNavigateConsole.messages.length, 1);
+  assert.equal(afterNavigateConsole.messages[0].text, "load boom");
+
+  const afterNavigateNetwork = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterNavigateNetwork.requests.length, 1);
+  assert.equal(
+    afterNavigateNetwork.requests[0].url,
+    "https://app.local/boot.json",
+  );
+
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "snapshot",
+      { sessionId },
+    ),
+    signal,
+  );
+  opened.guest.debugger.axNodes = [
+    {
+      ...opened.guest.debugger.axNodes[0],
+      name: { value: "Pay now" },
+    },
+    opened.guest.debugger.axNodes[1],
+  ];
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      6,
+      "conversation-1",
+      "snapshot",
+      { sessionId },
+    ),
+    signal,
+  );
+
+  const afterSnapshotConsole = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      7,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterSnapshotConsole.messages.length, 1);
+  assert.equal(afterSnapshotConsole.messages[0].text, "load boom");
+
+  const afterSnapshotNetwork = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      8,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(afterSnapshotNetwork.requests.length, 1);
+  assert.equal(
+    afterSnapshotNetwork.requests[0].url,
+    "https://app.local/boot.json",
+  );
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("execute binds a current snapshot ref to the in-page DOM node", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  const snapshot = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "snapshot",
+      { sessionId },
+    ),
+    signal,
+  );
+  const ref = snapshot.nodes[0].ref;
+  opened.guest.debugger.debugExecuteCallResult = {
+    result: {
+      value: { ok: true, value: "{\"tag\":\"BUTTON\"}" },
+    },
+  };
+  const executed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "execute",
+      {
+        sessionId,
+        function: "(el) => ({ tag: el.tagName })",
+        args: [{ ref }],
+      },
+    ),
+    signal,
+  );
+  assert.equal(executed.ok, true);
+  assert.equal(executed.value, "{\"tag\":\"BUTTON\"}");
+  const resolve = opened.guest.debugger.commands.find(
+    (entry) => entry.method === "DOM.resolveNode",
+  );
+  assert.notEqual(resolve, undefined);
+  assert.equal(resolve.params.backendNodeId, 7);
+  const call = opened.guest.debugger.commands.find((entry) =>
+    entry.method === "Runtime.callFunctionOn" &&
+      entry.params.functionDeclaration === DEBUG_EXECUTE_WRAPPER_FUNCTION
+  );
+  assert.notEqual(call, undefined);
+  assert.deepEqual(call.params.arguments, [
+    { value: true },
+    { objectId: "element-1" },
+  ]);
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("runtime fetches HTTP source maps and network bodies on the CDP path", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "console",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+
+  const originalUrl = "https://app.local/src/app.ts";
+  const generatedUrl = "https://app.local/bundle.js";
+  const mapUrl = "https://app.local/bundle.js.map";
+  const map = {
+    version: 3,
+    sources: [originalUrl],
+    mappings:
+      encodeVlq(42) + encodeVlq(0) + encodeVlq(10) + encodeVlq(4),
+  };
+  opened.guest.debugger.sourceMapContents.set(
+    mapUrl,
+    JSON.stringify(map),
+  );
+  emitCdp(opened.guest, "Debugger.scriptParsed", {
+    url: generatedUrl,
+    sourceMapURL: mapUrl,
+  });
+  await settleAsyncWork();
+  emitCdp(opened.guest, "Runtime.consoleAPICalled", {
+    type: "error",
+    args: [
+      { type: "string", value: "mapped" },
+      {
+        type: "object",
+        className: "Object",
+        description: "Object",
+        preview: {
+          properties: [
+            { name: "n", type: "number", value: 1 },
+          ],
+        },
+      },
+    ],
+    stackTrace: {
+      callFrames: [
+        {
+          functionName: "fail",
+          url: generatedUrl,
+          lineNumber: 0,
+          columnNumber: 42,
+        },
+        {
+          functionName: "boot",
+          url: "https://app.local/vendor.js",
+          lineNumber: 3,
+          columnNumber: 1,
+        },
+      ],
+    },
+  });
+  const listed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "console",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(listed.messages[0].url, originalUrl);
+  assert.equal(Object.hasOwn(listed.messages[0], "args"), false);
+  const detailed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "console",
+      { sessionId, id: listed.messages[0].id },
+    ),
+    signal,
+  );
+  assert.equal(detailed.messages[0].args[1].preview.n, 1);
+  assert.equal(detailed.messages[0].stack[0].url, originalUrl);
+  assert.equal(detailed.messages[0].stack[1].url, "https://app.local/vendor.js");
+
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "api",
+    type: "XHR",
+    timestamp: 1,
+    request: {
+      method: "POST",
+      url: "https://app.local/api/users",
+      headers: {
+        Cookie: "sid=secret",
+        Authorization: "Bearer secret",
+        Accept: "application/json",
+      },
+    },
+    initiator: {
+      type: "script",
+      stack: {
+        callFrames: [{
+          url: "https://app.local/src/api.ts",
+          lineNumber: 4,
+          columnNumber: 2,
+          functionName: "loadUsers",
+        }],
+      },
+    },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "api",
+    response: {
+      status: 200,
+      statusText: "OK",
+      mimeType: "application/json",
+      headers: { "Content-Type": "application/json" },
+    },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "api",
+    timestamp: 1.02,
+  });
+  const oversized = `{"pad":"${"B".repeat(3_000)}"}`;
+  opened.guest.debugger.networkBodies.set("api", {
+    body: oversized,
+    base64Encoded: false,
+  });
+  const networkList = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(Object.hasOwn(networkList.requests[0], "requestHeaders"), false);
+  assert.equal(Object.hasOwn(networkList.requests[0], "body"), false);
+  const networkDetail = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      6,
+      "conversation-1",
+      "network",
+      { sessionId, id: networkList.requests[0].id },
+    ),
+    signal,
+  );
+  assert.equal(networkDetail.requests[0].requestHeaders.Cookie, "[redacted]");
+  assert.equal(
+    networkDetail.requests[0].requestHeaders.Authorization,
+    "[redacted]",
+  );
+  assert.equal(networkDetail.requests[0].requestHeaders.Accept, "application/json");
+  assert.equal(
+    networkDetail.requests[0].body.endsWith("... <truncated>"),
+    true,
+  );
+  assert.equal(networkDetail.requests[0].initiator.url, "https://app.local/src/api.ts");
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("network since_id, url_contains, and wait go through handleProcessRequest", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "network",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "old",
+    type: "XHR",
+    timestamp: 1,
+    request: { method: "GET", url: "https://app.local/old" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "old",
+    timestamp: 1.01,
+  });
+  const first = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  const cursor = first.lastId;
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "users",
+    type: "XHR",
+    timestamp: 2,
+    request: { method: "GET", url: "https://app.local/api/users" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "users",
+    timestamp: 2.01,
+  });
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "other",
+    type: "XHR",
+    timestamp: 2,
+    request: { method: "GET", url: "https://app.local/api/other" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "other",
+    timestamp: 2.02,
+  });
+  const newer = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "network",
+      { sessionId, sinceId: cursor },
+    ),
+    signal,
+  );
+  assert.equal(
+    newer.requests.some((request) => request.url.endsWith("/old")),
+    false,
+  );
+  const filtered = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "network",
+      { sessionId, urlContains: "/users" },
+    ),
+    signal,
+  );
+  assert.deepEqual(
+    filtered.requests.map((request) => request.url),
+    ["https://app.local/api/users"],
+  );
+
+  const waiting = target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      6,
+      "conversation-1",
+      "network",
+      {
+        sessionId,
+        urlContains: "/late",
+        wait: true,
+        timeoutMs: 1_000,
+      },
+    ),
+    signal,
+  );
+  await settleAsyncWork();
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "late",
+    type: "XHR",
+    timestamp: 3,
+    request: { method: "GET", url: "https://app.local/api/late" },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "late",
+    timestamp: 3.01,
+  });
+  const waited = await waiting;
+  assert.equal(waited.requests.length, 1);
+  assert.equal(waited.requests[0].url, "https://app.local/api/late");
+  assert.equal(waited.requests[0].outcome, "finished");
+
+  const timedOut = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      7,
+      "conversation-1",
+      "network",
+      {
+        sessionId,
+        urlContains: "/never",
+        wait: true,
+        timeoutMs: 80,
+      },
+    ),
+    signal,
+  );
+  assert.equal(timedOut.enabled, true);
+  assert.deepEqual(timedOut.requests, []);
+  assert.equal(timedOut.lastId, waited.lastId);
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("network id drill-down returns truncated requestBody from postData and getRequestPostData", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const signal = new AbortController().signal;
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      2,
+      "conversation-1",
+      "network",
+      { sessionId, enable: true },
+    ),
+    signal,
+  );
+  const enable = opened.guest.debugger.commands.find(
+    (entry) => entry.method === "Network.enable",
+  );
+  assert.notEqual(enable, undefined);
+  assert.ok(enable.params.maxPostDataSize > 0);
+  assert.ok(enable.params.maxResourceBufferSize > 0);
+  assert.ok(enable.params.maxTotalBufferSize > 0);
+
+  const oversized = `{"name":"${"N".repeat(3_000)}"}`;
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "create",
+    type: "XHR",
+    timestamp: 1,
+    request: {
+      method: "POST",
+      url: "https://app.local/api/users",
+      headers: { "Content-Type": "application/json" },
+      postData: oversized,
+    },
+  });
+  emitCdp(opened.guest, "Network.responseReceived", {
+    requestId: "create",
+    response: {
+      status: 201,
+      statusText: "Created",
+      mimeType: "application/json",
+    },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "create",
+    timestamp: 1.02,
+  });
+  const listed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "network",
+      { sessionId },
+    ),
+    signal,
+  );
+  assert.equal(Object.hasOwn(listed.requests[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(listed.requests[0], "body"), false);
+  const detailed = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      4,
+      "conversation-1",
+      "network",
+      { sessionId, id: listed.requests[0].id },
+    ),
+    signal,
+  );
+  assert.equal(
+    detailed.requests[0].requestBody.endsWith("... <truncated>"),
+    true,
+  );
+  assert.equal(
+    opened.guest.debugger.commands.some(
+      (entry) => entry.method === "Network.getRequestPostData",
+    ),
+    false,
+  );
+
+  opened.guest.debugger.networkPostData.set("form", "user=&password=");
+  emitCdp(opened.guest, "Network.requestWillBeSent", {
+    requestId: "form",
+    type: "Fetch",
+    timestamp: 2,
+    request: {
+      method: "POST",
+      url: "https://app.local/api/login",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      hasPostData: true,
+    },
+  });
+  emitCdp(opened.guest, "Network.loadingFinished", {
+    requestId: "form",
+    timestamp: 2.01,
+  });
+  const formList = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      5,
+      "conversation-1",
+      "network",
+      { sessionId, urlContains: "/login" },
+    ),
+    signal,
+  );
+  assert.equal(Object.hasOwn(formList.requests[0], "requestBody"), false);
+  const formDetail = await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      6,
+      "conversation-1",
+      "network",
+      { sessionId, id: formList.requests[0].id },
+    ),
+    signal,
+  );
+  assert.equal(formDetail.requests[0].requestBody, "user=&password=");
+  assert.ok(
+    opened.guest.debugger.commands.some(
+      (entry) =>
+        entry.method === "Network.getRequestPostData" &&
+          entry.params.requestId === "form",
+    ),
+  );
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+

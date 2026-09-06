@@ -410,6 +410,7 @@ class DesktopApplication {
           sourceUserAgent,
         ),
       );
+      agentBrowser.setAutoEnableDebug(settings.agentDebug);
       browserSettings = settings;
     };
     applyBrowserSettings(browserSettings);
@@ -516,6 +517,7 @@ class DesktopApplication {
       },
       pluginManagement,
       webSearch: webSearchSettings,
+      browser: browserSettings,
       agentBrowser,
       onUnexpectedExit: (exit) => {
         void this.#handleUnexpectedExit(exit);

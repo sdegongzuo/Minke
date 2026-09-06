@@ -1,5 +1,6 @@
 import {
   inferAgentBrowserNodeActions,
+  MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
   MAX_AGENT_BROWSER_SCROLL_COORDINATE,
   type AgentBrowserCursorPoint,
   type AgentBrowserCursorViewport,
@@ -18,6 +19,18 @@ import {
   GENERATED_LOCATOR_RESOLVER_FUNCTION,
   parseGeneratedLocatorCode,
 } from "./experimental-generated-locator.ts";
+import {
+  AgentBrowserDebugCollector,
+  DEBUG_EXECUTE_WRAPPER_FUNCTION,
+  isSameOriginHttpUrl,
+  isTextualNetworkBody,
+  truncateDebugText,
+  type AgentBrowserConsoleQuery,
+  type AgentBrowserConsoleView,
+  type AgentBrowserExecuteOutcome,
+  type AgentBrowserNetworkQuery,
+  type AgentBrowserNetworkView,
+} from "./debug.ts";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_SNAPSHOT_NODES = 300;
@@ -194,6 +207,18 @@ export interface AgentBrowserCdpOptions {
     reason: AgentBrowserGenerationChangeReason,
   ) => void;
   readonly onDetach?: (reason: string) => void;
+}
+
+function isSnapshotElementArg(
+  value: unknown,
+): value is { readonly ref: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "ref") return false;
+  const ref = (value as { ref: unknown }).ref;
+  return typeof ref === "string" && /^s\d+:e\d+$/u.test(ref);
 }
 
 export type AgentBrowserGenerationChangeReason =
@@ -1153,6 +1178,8 @@ export class AgentBrowserCdp {
   #findCursorSequence = 0;
   #generatedLocatorSequence = 0;
   #mainFrameId: string | undefined;
+  readonly #debug = new AgentBrowserDebugCollector();
+  #sourceMapFetchTail: Promise<void> = Promise.resolve();
   #attached = false;
   #disposed = false;
   #intentionalDetach = false;
@@ -1232,6 +1259,17 @@ export class AgentBrowserCdp {
     return this.#generation;
   }
 
+  /**
+   * Drop console/network rows and source maps at document commit or at the
+   * start of a document navigation. Snapshot, control, and post-load
+   * `invalidateReferences` must not call this — load-time events belong to
+   * the document that just committed.
+   */
+  resetDebugForDocumentNavigation(): void {
+    this.#debug.clear();
+    this.#debug.clearSourceMaps();
+  }
+
   markReferencesDirty(
     reason: AgentBrowserGenerationChangeReason = "references",
   ): void {
@@ -1264,6 +1302,7 @@ export class AgentBrowserCdp {
     const observation = this.#beginNavigationObservation();
     try {
       if (signal?.aborted === true) throw abortError(signal);
+      this.resetDebugForDocumentNavigation();
       dispatched = true;
       const result = commandResult<{
         errorText?: unknown;
@@ -3436,6 +3475,334 @@ export class AgentBrowserCdp {
     return result.data;
   }
 
+  /**
+   * Start console and network capture.
+   *
+   * Both domains are enabled lazily. The debugger stays attached for the
+   * whole session, so enabling them up front would stream every request of
+   * every page into the buffer whether or not the agent ever reads it.
+   */
+  async enableDebug(signal?: AbortSignal): Promise<void> {
+    if (this.#debug.enabled) return;
+    // Mark before enabling domains so scriptParsed events that arrive
+    // while Debugger.enable is in flight are not dropped.
+    this.#debug.markEnabled();
+    try {
+      await Promise.all([
+        this.#command("Log.enable", {}, signal),
+        this.#command(
+          "Network.enable",
+          {
+            maxTotalBufferSize: 10_000_000,
+            maxResourceBufferSize: 5_000_000,
+            maxPostDataSize: 65_536,
+          },
+          signal,
+        ),
+        this.#command("Debugger.enable", {}, signal),
+      ]);
+      await this.#fetchPendingSourceMaps(signal);
+    } catch (error) {
+      this.#debug.markDisabled();
+      throw error;
+    }
+  }
+
+  async disableDebug(signal?: AbortSignal): Promise<void> {
+    if (!this.#debug.enabled) return;
+    this.#debug.markDisabled();
+    // The target may already be gone; stopping capture is best effort.
+    await Promise.all([
+      this.#command("Log.disable", {}, signal).catch(() => undefined),
+      this.#command("Network.disable", {}, signal).catch(() => undefined),
+      this.#command("Debugger.disable", {}, signal).catch(() => undefined),
+    ]);
+  }
+
+  /** Empty console/network buffers without stopping capture. */
+  clearDebug(): void {
+    this.#debug.clear();
+  }
+
+  readConsole(
+    query: AgentBrowserConsoleQuery = {},
+  ): AgentBrowserConsoleView {
+    return this.#debug.readConsole(query);
+  }
+
+  readNetwork(
+    query: AgentBrowserNetworkQuery = {},
+  ): AgentBrowserNetworkView {
+    return this.#debug.readNetwork(query);
+  }
+
+  async hydrateNetworkBody(
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const requestId = this.#debug.networkRequestIdFor(id);
+    if (requestId === undefined) return;
+    if (this.#debug.needsRequestPostData(id)) {
+      try {
+        const result = record(
+          await this.#command(
+            "Network.getRequestPostData",
+            { requestId },
+            signal,
+          ),
+        );
+        if (typeof result.postData === "string") {
+          this.#debug.attachRequestBody(requestId, result.postData);
+        }
+      } catch {
+        // Fetch failure leaves requestBody absent.
+      }
+    }
+    const mimeType = this.#debug.networkMimeTypeFor(id);
+    if (!isTextualNetworkBody(mimeType)) return;
+    try {
+      const result = record(
+        await this.#command(
+          "Network.getResponseBody",
+          { requestId },
+          signal,
+        ),
+      );
+      const raw = typeof result.body === "string" ? result.body : "";
+      const text = result.base64Encoded === true
+        ? Buffer.from(raw, "base64").toString("utf8")
+        : raw;
+      this.#debug.attachResponseBody(requestId, text);
+    } catch {
+      // Fetch failure leaves the detail metadata-only.
+    }
+  }
+
+  async waitForNetwork(
+    query: AgentBrowserNetworkQuery,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<AgentBrowserNetworkView> {
+    const sinceId = query.sinceId ?? this.#debug.lastId;
+    const waitQuery = { ...query, sinceId };
+    const wait = this.#debug.waitForNetwork(waitQuery);
+    const timeout = new Promise<AgentBrowserNetworkView>((resolve) => {
+      const timer = setTimeout(() => {
+        wait.cancel();
+        resolve(this.#debug.readNetwork(waitQuery));
+      }, timeoutMs);
+      timer.unref();
+    });
+    if (signal === undefined) {
+      return await Promise.race([wait.promise, timeout]);
+    }
+    if (signal.aborted) {
+      wait.cancel();
+      throw abortError(signal);
+    }
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const handleAbort = (): void => {
+        wait.cancel();
+        reject(abortError(signal));
+      };
+      signal.addEventListener("abort", handleAbort, { once: true });
+    });
+    try {
+      return await Promise.race([wait.promise, timeout, aborted]);
+    } finally {
+      wait.cancel();
+    }
+  }
+
+  /** Whether console/network capture is currently enabled. */
+  get debugEnabled(): boolean {
+    return this.#debug.enabled;
+  }
+
+  /**
+   * Restricted debug evaluation: evaluates one function expression and calls
+   * it with JSON arguments inside the page. The expression is evaluated as a
+   * value (`"(" + fn + ")"`), never as statements, and the return value is
+   * JSON-serialized in-page so DOM nodes and cycles degrade gracefully.
+   * A `{ ref }` argument from the current snapshot is bound to that DOM node.
+   */
+  async executeDebugFunction(
+    fn: string,
+    args: readonly unknown[],
+    awaitPromise: boolean,
+    signal?: AbortSignal,
+  ): Promise<AgentBrowserExecuteOutcome> {
+    const evaluateResult = record(
+      await this.#command(
+        "Runtime.evaluate",
+        { expression: `(${fn})`, returnByValue: false },
+        signal,
+      ),
+    );
+    if (evaluateResult.exceptionDetails !== undefined) {
+      return {
+        ok: false,
+        errorText: this.#debugExceptionText(
+          evaluateResult.exceptionDetails,
+        ),
+      };
+    }
+    const fnObject = record(evaluateResult.result);
+    if (
+      fnObject.type !== "function" ||
+      typeof fnObject.objectId !== "string"
+    ) {
+      return {
+        ok: false,
+        errorText:
+          "Agent Browser execute function must be a function expression",
+      };
+    }
+    const callArguments: Record<string, unknown>[] = [
+      { value: awaitPromise },
+    ];
+    for (const entry of args) {
+      if (isSnapshotElementArg(entry)) {
+        const reference = this.#resolveReference(entry.ref);
+        const resolved = record(
+          await this.#command(
+            "DOM.resolveNode",
+            { backendNodeId: reference.backendNodeId },
+            signal,
+          ),
+        );
+        const objectId = record(resolved.object).objectId;
+        if (typeof objectId !== "string" || objectId === "") {
+          return {
+            ok: false,
+            errorText:
+              `Agent Browser execute could not resolve snapshot ref ${entry.ref}`,
+          };
+        }
+        callArguments.push({ objectId });
+        continue;
+      }
+      callArguments.push({ value: entry });
+    }
+    const callResult = record(
+      await this.#command(
+        "Runtime.callFunctionOn",
+        {
+          objectId: fnObject.objectId,
+          functionDeclaration: DEBUG_EXECUTE_WRAPPER_FUNCTION,
+          arguments: callArguments,
+          returnByValue: true,
+          awaitPromise: true,
+        },
+        signal,
+      ),
+    );
+    if (callResult.exceptionDetails !== undefined) {
+      return {
+        ok: false,
+        errorText: this.#debugExceptionText(
+          callResult.exceptionDetails,
+        ),
+      };
+    }
+    const wrapperValue = record(callResult.result).value;
+    const outcome = record(wrapperValue);
+    const ok = outcome.ok === true;
+    const text = typeof outcome.value === "string"
+      ? outcome.value
+      : typeof outcome.error === "string"
+        ? outcome.error
+        : "Agent Browser execute produced no result";
+    const bounded = truncateDebugText(
+      text,
+      MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
+    );
+    return ok && typeof outcome.value === "string"
+      ? { ok: true, value: bounded }
+      : { ok: false, errorText: bounded };
+  }
+
+  async #fetchPendingSourceMaps(signal?: AbortSignal): Promise<void> {
+    const pending = this.#debug.takePendingRemoteSourceMaps();
+    for (const item of pending) {
+      if (!isSameOriginHttpUrl(item.scriptUrl, item.sourceMapUrl)) {
+        continue;
+      }
+      const text = await this.#fetchSourceMapText(item.sourceMapUrl, signal);
+      if (text === undefined) continue;
+      try {
+        this.#debug.ingestSourceMap(item.scriptUrl, JSON.parse(text));
+      } catch {
+        // Fetch/parse failure keeps the generated position.
+      }
+    }
+  }
+
+  async #fetchSourceMapText(
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    const frameId = this.#mainFrameId;
+    if (frameId !== undefined) {
+      try {
+        const resource = record(
+          await this.#command(
+            "Page.getResourceContent",
+            { frameId, url },
+            signal,
+          ),
+        );
+        if (typeof resource.content === "string") {
+          return resource.base64Encoded === true
+            ? Buffer.from(resource.content, "base64").toString("utf8")
+            : resource.content;
+        }
+      } catch {
+        // Fall through to Network.loadNetworkResource.
+      }
+    }
+    try {
+      const loaded = record(
+        await this.#command(
+          "Network.loadNetworkResource",
+          {
+            ...(frameId === undefined ? {} : { frameId }),
+            url,
+            options: {
+              disableCache: false,
+              includeCredentials: true,
+            },
+          },
+          signal,
+        ),
+      );
+      const resource = record(loaded.resource);
+      if (resource.success === true && typeof resource.content === "string") {
+        return resource.content;
+      }
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  }
+
+  #debugExceptionText(details: unknown): string {
+    const recordDetails = record(details);
+    const exception = record(recordDetails.exception);
+    const description =
+      typeof exception.description === "string"
+        ? exception.description
+        : typeof exception.value === "string"
+          ? exception.value
+          : typeof recordDetails.text === "string"
+            ? recordDetails.text
+            : "unknown exception";
+    return truncateDebugText(
+      description,
+      MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
+    );
+  }
+
   dispose(): void {
     if (this.#disposed) return;
     this.#endAnnotationPicker(
@@ -3443,6 +3810,7 @@ export class AgentBrowserCdp {
       "Agent Browser target is closed",
     );
     this.#disposed = true;
+    this.#debug.markDisabled();
     this.#references.clear();
     this.#snapshotCache = undefined;
     this.#referencesDirty = true;
@@ -3491,7 +3859,13 @@ export class AgentBrowserCdp {
       return;
     }
     if (typeof method === "string") {
+      this.#debug.handleEvent(method, params);
       this.#recordNavigationEvent(method, params);
+      if (method === "Debugger.scriptParsed" && this.#debug.enabled) {
+        this.#sourceMapFetchTail = this.#sourceMapFetchTail
+          .then(() => this.#fetchPendingSourceMaps())
+          .catch(() => undefined);
+      }
     }
     if (method === "Page.frameNavigated") {
       const frame = record(record(params).frame);
@@ -3505,6 +3879,7 @@ export class AgentBrowserCdp {
           : undefined;
       if (frameId !== undefined && parentId === undefined) {
         this.#mainFrameId = frameId;
+        this.resetDebugForDocumentNavigation();
         this.invalidateReferences("document");
       } else {
         this.markReferencesDirty("document");

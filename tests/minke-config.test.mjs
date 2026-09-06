@@ -444,6 +444,7 @@ test("desktop settings share one versioned Minke config", async () => {
       browser: {
         webUserAgent: "Ordinary/1",
         agentUserAgent: "Agent/2",
+        agentDebug: false,
       },
     });
     assert.deepEqual(

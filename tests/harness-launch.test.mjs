@@ -30,6 +30,9 @@ import {
   MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV,
 } from "@minke/harness-overlay/web-search-settings-contract.ts";
 import {
+  MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV,
+} from "@minke/harness-overlay/browser-settings-contract.ts";
+import {
   agentTurnErrorResponse,
   agentTurnResultResponse,
   parseAgentTurnProcessRequest,
@@ -246,6 +249,9 @@ test("the desktop runtime passes both explicit local-model opt-ins", () => {
     [MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV]: "1",
     [MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV.toLowerCase()]:
       "stale-lowercase",
+    [MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV]: "1",
+    [MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV.toLowerCase()]:
+      "stale-lowercase",
     [AGENT_BROWSER_IPC_VERSION_ENV]: "stale",
     [AGENT_BROWSER_IPC_VERSION_ENV.toLowerCase()]:
       "stale-lowercase",
@@ -264,6 +270,7 @@ test("the desktop runtime passes both explicit local-model opt-ins", () => {
       MINKE_PLUGIN_SAFE_MODE: "1",
       MINKE_DISABLED_PLUGINS: "[\"broken-plugin\"]",
       [MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV]: "0",
+      [MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV]: "0",
       PRESERVED: "yes",
       DSH_HOME: "/data/harness",
       ELECTRON_RUN_AS_NODE: "1",
@@ -287,6 +294,21 @@ test("the desktop runtime passes both explicit local-model opt-ins", () => {
       },
       inherited,
     )[MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV],
+    "1",
+  );
+  assert.equal(
+    harnessRuntimeEnvironment(
+      layout,
+      {
+        ...options,
+        browser: {
+          webUserAgent: "",
+          agentUserAgent: "",
+          agentDebug: true,
+        },
+      },
+      inherited,
+    )[MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV],
     "1",
   );
   const { webSearch: _webSearch, ...optionsWithoutWebSearch } =

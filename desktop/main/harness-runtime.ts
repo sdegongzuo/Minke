@@ -20,6 +20,11 @@ import {
   MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV,
   type WebSearchSettings,
 } from "@minke/harness-overlay/web-search-settings-contract.ts";
+import {
+  DEFAULT_BROWSER_SETTINGS,
+  MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV,
+  type BrowserSettings,
+} from "@minke/harness-overlay/browser-settings-contract.ts";
 import type {
   AgentTurnInput,
   AgentTurnResult,
@@ -74,6 +79,7 @@ export interface HarnessRuntimeOptions {
   modelRuntimes: LocalModelRuntimeLaunchOptions;
   pluginManagement: PluginManagementSettings;
   webSearch: WebSearchSettings;
+  browser?: BrowserSettings;
   agentBrowser?: Pick<AgentBrowserRuntime, "bindChild">;
   onUnexpectedExit(exit: HarnessRuntimeExit): void;
   startupTimeoutMs?: number;
@@ -100,6 +106,7 @@ type HarnessRuntimeEnvironmentOptions = Pick<
 > & {
   pluginManagement?: PluginManagementSettings;
   webSearch?: WebSearchSettings;
+  browser?: BrowserSettings;
 };
 
 const LOCAL_MODEL_ENVIRONMENT = [
@@ -153,6 +160,12 @@ export function harnessRuntimeEnvironment(
     environment,
     MINKE_WEB_SEARCH_FALLBACK_ENABLED_ENV,
     webSearch.fallbackEnabled ? "1" : "0",
+  );
+  const browser = options.browser ?? DEFAULT_BROWSER_SETTINGS;
+  setEnvironmentName(
+    environment,
+    MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV,
+    browser.agentDebug ? "1" : "0",
   );
   deleteEnvironmentName(
     environment,

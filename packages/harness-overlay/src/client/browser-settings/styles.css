@@ -77,6 +77,77 @@
   gap: 8px;
 }
 
+.minke-browser-settings__field--toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+.minke-browser-settings__control--toggle {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.minke-browser-settings__switch {
+  position: relative;
+  display: inline-flex;
+  width: 36px;
+  height: 20px;
+  flex: none;
+}
+
+.minke-browser-settings__switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.minke-browser-settings__switch > span {
+  box-sizing: border-box;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l2);
+  transition: background 120ms ease;
+}
+
+.minke-browser-settings__switch > span::after {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-primary-foreground);
+  content: "";
+  transition: transform 120ms ease;
+}
+
+.minke-browser-settings__switch input:checked + span {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.minke-browser-settings__switch input:checked + span::after {
+  transform: translateX(16px);
+}
+
+.minke-browser-settings__switch input:focus-visible + span {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
+
+.minke-browser-settings__switch input:disabled + span {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .minke-browser-settings__input {
   box-sizing: border-box;
   width: 100%;

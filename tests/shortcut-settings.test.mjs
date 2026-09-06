@@ -114,6 +114,7 @@ test("the desktop store writes the shared Minke config", async () => {
     browser: {
       webUserAgent: "",
       agentUserAgent: "",
+      agentDebug: false,
     },
   });
   assertDefaultRemoteSettings(remote);

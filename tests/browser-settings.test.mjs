@@ -44,6 +44,7 @@ test("browser settings default to automatic reduced Chrome identities", () => {
   assert.deepEqual(DEFAULT_BROWSER_SETTINGS, {
     webUserAgent: "",
     agentUserAgent: "",
+    agentDebug: false,
   });
   assert.equal(
     defaultChromeUserAgent(ELECTRON_USER_AGENT),
@@ -65,6 +66,7 @@ test("browser settings default to automatic reduced Chrome identities", () => {
     {
       webUserAgent: "WebBrowser/1",
       agentUserAgent: "AgentBrowser/2",
+      agentDebug: false,
     },
   );
   assert.throws(
@@ -91,6 +93,27 @@ test("browser settings default to automatic reduced Chrome identities", () => {
         webUserAgent: "",
         agentUserAgent: "",
         shared: true,
+      }),
+    /browser settings/u,
+  );
+  assert.deepEqual(
+    parseBrowserSettings({
+      webUserAgent: "",
+      agentUserAgent: "",
+      agentDebug: true,
+    }),
+    {
+      webUserAgent: "",
+      agentUserAgent: "",
+      agentDebug: true,
+    },
+  );
+  assert.throws(
+    () =>
+      parseBrowserSettings({
+        webUserAgent: "",
+        agentUserAgent: "",
+        agentDebug: "yes",
       }),
     /browser settings/u,
   );
@@ -139,6 +162,7 @@ test("browser settings IPC stores before applying and authorizes both verbs", as
   assert.deepEqual(settings, {
     webUserAgent: "Web/1",
     agentUserAgent: "Agent/2",
+    agentDebug: false,
   });
   await assert.rejects(
     handlers.get(BROWSER_SETTINGS_WRITE_CHANNEL)(
@@ -184,10 +208,12 @@ test("desktop browser bridge hydrates and persists independent UA values", async
   );
   runtime.setUserAgent("webUserAgent", "Ordinary/1");
   runtime.setUserAgent("agentUserAgent", "Agent/2");
+  runtime.setAgentDebug(true);
   await runtime.flush();
   assert.deepEqual(settings, {
     webUserAgent: "Ordinary/1",
     agentUserAgent: "Agent/2",
+    agentDebug: true,
   });
   assert.throws(
     () => runtime.setUserAgent("webUserAgent", "浏览器/1"),
@@ -219,6 +245,10 @@ test("browser identity renders as a standalone multiline module", async () => {
   assert.equal(html.includes("data-minke-preferences"), false);
   assert.equal(html.includes("普通访问"), true);
   assert.equal(html.includes("Agent 访问"), true);
+  assert.equal(html.includes("Agent 调试工具"), true);
+  assert.equal(html.includes("data-minke-browser-debug"), true);
+  assert.match(html, /type="checkbox"/u);
+  assert.doesNotMatch(html, /checked=""/u);
   assert.equal(html.includes("当前自动 Chrome UA"), false);
   assert.equal(html.includes("Chrome/150.0.0.0"), true);
   assert.equal(html.includes("Minke/0.2.0"), false);

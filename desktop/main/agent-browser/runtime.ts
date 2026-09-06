@@ -27,6 +27,7 @@ import {
   parseAgentBrowserSessionId,
   type AgentBrowserNavigationCommand,
   type AgentBrowserNavigationState,
+  type AgentBrowserConsoleLevel,
   type AgentBrowserOperationResult,
   type AgentBrowserClaimControlResult,
   type AgentBrowserCursorPhase,
@@ -40,6 +41,7 @@ import {
   type AgentBrowserTarget,
   type AgentBrowserSessionResult,
   type AgentBrowserSessionStatus,
+  MAX_AGENT_BROWSER_DEBUG_WAIT_TIMEOUT_MS,
 } from "@minke/harness-overlay/agent-browser-contract.ts";
 import {
   AGENT_BROWSER_HISTORY_CLEAR_CHANNEL,
@@ -96,6 +98,7 @@ const CURSOR_MIN_TRAVEL_DURATION_MS = 160;
 const CURSOR_MAX_TRAVEL_DURATION_MS = 420;
 const CURSOR_FALLBACK_TRAVEL_DURATION_MS = 240;
 const CURSOR_CLICK_FEEDBACK_HOLD_MS = 54;
+const DEFAULT_NETWORK_WAIT_TIMEOUT_MS = 10_000;
 
 export type AgentBrowserWebviewDecision =
   | "unmatched"
@@ -114,6 +117,12 @@ export interface AgentBrowserRuntimeOptions {
   readonly createToken?: () => string;
   readonly guestAttachTimeoutMs?: number;
   readonly cdpCommandTimeoutMs?: number;
+  /**
+   * When true (or when the getter returns true), a new Agent Browser session
+   * starts console/network capture without a prior enable: true so load-time
+   * events are recorded. Mirrors the durable Agent-debug setting.
+   */
+  readonly autoEnableDebug?: boolean | (() => boolean);
   /** Runtime-owned durable visit log, closed by dispose(). */
   readonly history?: AgentBrowserHistoryPort;
 }
@@ -186,6 +195,24 @@ function sessionCrashed(
   state: AgentBrowserSessionState,
 ): boolean {
   return state.status === "crashed";
+}
+
+function normalizeAutoEnableDebug(
+  value: boolean | (() => boolean) | undefined,
+): () => boolean {
+  if (typeof value === "function") return value;
+  const enabled = value === true;
+  return () => enabled;
+}
+
+function isSnapshotElementArg(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "ref") return false;
+  const ref = (value as { ref: unknown }).ref;
+  return typeof ref === "string" && /^s\d+:e\d+$/u.test(ref);
 }
 
 function positiveTimeout(
@@ -393,6 +420,7 @@ export class AgentBrowserRuntime {
   #windowBinding: WindowProjectionBinding | undefined;
   #windowBindingDisposer: (() => void) | undefined;
   #userAgent: string | undefined;
+  #autoEnableDebug: () => boolean;
   #historyWriteFailureReported = false;
   #disposed = false;
 
@@ -409,12 +437,23 @@ export class AgentBrowserRuntime {
       "Agent Browser CDP timeout",
     );
     this.#history = options.history;
+    this.#autoEnableDebug = normalizeAutoEnableDebug(
+      options.autoEnableDebug,
+    );
   }
 
   projections(): readonly AgentBrowserProjection[] {
     return [...this.#states.values()].map((state) =>
       this.#projection(state)
     );
+  }
+
+  /**
+   * When Agent debug is on, new sessions auto-start console/network capture
+   * so load-time events are recorded without a prior enable: true.
+   */
+  setAutoEnableDebug(enabled: boolean | (() => boolean)): void {
+    this.#autoEnableDebug = normalizeAutoEnableDebug(enabled);
   }
 
   /** Apply one main-owned identity to current and future Agent sessions. */
@@ -945,6 +984,9 @@ export class AgentBrowserRuntime {
             );
           }
           this.#clearCursor(state);
+          if (command !== "stop") {
+            cdp.resetDebugForDocumentNavigation();
+          }
           cdp.invalidateReferences("document");
           state.generation = cdp.generation;
           state.snapshotRequired = true;
@@ -1135,6 +1177,112 @@ export class AgentBrowserRuntime {
             mimeType: "image/png",
             data: await cdp.screenshot(signal),
           };
+        case "console": {
+          await this.#applyDebugEnable(
+            cdp,
+            parsed.payload.enable,
+            signal,
+          );
+          if (parsed.payload.clear === true) {
+            cdp.clearDebug();
+          }
+          return {
+            ...this.#sessionResult(state),
+            ...cdp.readConsole({
+              ...(Array.isArray(parsed.payload.levels)
+                ? {
+                    levels:
+                      parsed.payload.levels as readonly AgentBrowserConsoleLevel[],
+                  }
+                : {}),
+              ...(typeof parsed.payload.limit === "number"
+                ? { limit: parsed.payload.limit }
+                : {}),
+              ...(typeof parsed.payload.id === "number"
+                ? { id: parsed.payload.id }
+                : {}),
+              ...(typeof parsed.payload.sinceId === "number"
+                ? { sinceId: parsed.payload.sinceId }
+                : {}),
+            }),
+          };
+        }
+        case "network": {
+          await this.#applyDebugEnable(
+            cdp,
+            parsed.payload.enable,
+            signal,
+          );
+          if (parsed.payload.clear === true) {
+            cdp.clearDebug();
+          }
+          const networkQuery = {
+            ...(Array.isArray(parsed.payload.resourceTypes)
+              ? {
+                  resourceTypes:
+                    parsed.payload.resourceTypes as readonly string[],
+                }
+              : {}),
+            ...(typeof parsed.payload.limit === "number"
+              ? { limit: parsed.payload.limit }
+              : {}),
+            ...(parsed.payload.failuresOnly === true
+              ? { failuresOnly: true }
+              : {}),
+            ...(typeof parsed.payload.id === "number"
+              ? { id: parsed.payload.id }
+              : {}),
+            ...(typeof parsed.payload.sinceId === "number"
+              ? { sinceId: parsed.payload.sinceId }
+              : {}),
+            ...(typeof parsed.payload.urlContains === "string"
+              ? { urlContains: parsed.payload.urlContains }
+              : {}),
+          };
+          if (typeof parsed.payload.id === "number") {
+            await cdp.hydrateNetworkBody(parsed.payload.id, signal);
+          }
+          if (parsed.payload.wait === true) {
+            const timeoutMs = typeof parsed.payload.timeoutMs === "number"
+              ? parsed.payload.timeoutMs
+              : DEFAULT_NETWORK_WAIT_TIMEOUT_MS;
+            const bounded = Math.min(
+              timeoutMs,
+              MAX_AGENT_BROWSER_DEBUG_WAIT_TIMEOUT_MS,
+            );
+            return {
+              ...this.#sessionResult(state),
+              ...await cdp.waitForNetwork(
+                networkQuery,
+                bounded,
+                signal,
+              ),
+            };
+          }
+          return {
+            ...this.#sessionResult(state),
+            ...cdp.readNetwork(networkQuery),
+          };
+        }
+        case "execute": {
+          await this.#applyDebugEnable(cdp, true, signal);
+          const args = Array.isArray(parsed.payload.args)
+            ? (parsed.payload.args as readonly unknown[])
+            : [];
+          if (args.some(isSnapshotElementArg)) {
+            this.#requireFreshSnapshot(state);
+          }
+          const outcome = await cdp.executeDebugFunction(
+            requiredString(parsed.payload, "function"),
+            args,
+            parsed.payload.awaitPromise !== false,
+            signal,
+          );
+          return {
+            ...this.#sessionResult(state),
+            ...outcome,
+          };
+        }
         case "open":
         case "close":
           throw new AgentBrowserError(
@@ -1143,6 +1291,20 @@ export class AgentBrowserRuntime {
           );
       }
     });
+  }
+
+  async #applyDebugEnable(
+    cdp: AgentBrowserCdp,
+    enable: unknown,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (enable === false) {
+      await cdp.disableDebug(signal);
+      return;
+    }
+    if (enable === true) {
+      await cdp.enableDebug(signal);
+    }
   }
 
   async claimControl(
@@ -2095,6 +2257,9 @@ export class AgentBrowserRuntime {
     state.cdp = cdp;
     try {
       await cdp.attach();
+      if (this.#autoEnableDebug()) {
+        await cdp.enableDebug();
+      }
       if (
         state.closing ||
         this.#states.get(state.sessionId) !== state ||

@@ -72,6 +72,16 @@ export class BrowserSettingsRuntime {
     });
   }
 
+  setAgentDebug(agentDebug: boolean): void {
+    if (!this.#snapshot.editable) {
+      throw new Error("browser settings are not editable");
+    }
+    this.#commit({
+      ...this.#snapshot.settings,
+      agentDebug,
+    });
+  }
+
   async flush(): Promise<void> {
     await this.#saveTail;
   }
@@ -109,7 +119,8 @@ export class BrowserSettingsRuntime {
       settings.webUserAgent ===
         this.#snapshot.settings.webUserAgent &&
       settings.agentUserAgent ===
-        this.#snapshot.settings.agentUserAgent
+        this.#snapshot.settings.agentUserAgent &&
+      settings.agentDebug === this.#snapshot.settings.agentDebug
     ) {
       return;
     }

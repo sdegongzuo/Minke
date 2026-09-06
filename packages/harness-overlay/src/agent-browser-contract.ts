@@ -29,6 +29,9 @@ export const AGENT_BROWSER_OPERATIONS = [
   "scroll",
   "wait",
   "screenshot",
+  "console",
+  "network",
+  "execute",
   "close",
 ] as const;
 
@@ -288,6 +291,110 @@ export interface AgentBrowserScreenshotResult
   readonly data: string;
 }
 
+/**
+ * Console and network payloads are re-declared here rather than imported from
+ * the desktop process: this contract is the shared Harness-side boundary, and
+ * the two sides deliberately do not depend on each other's internals.
+ */
+export const AGENT_BROWSER_CONSOLE_LEVELS = [
+  "log",
+  "debug",
+  "info",
+  "warn",
+  "error",
+] as const;
+export type AgentBrowserConsoleLevel =
+  typeof AGENT_BROWSER_CONSOLE_LEVELS[number];
+
+export const AGENT_BROWSER_CONSOLE_SOURCES = [
+  "console",
+  "exception",
+  "browser",
+] as const;
+export type AgentBrowserConsoleSource =
+  typeof AGENT_BROWSER_CONSOLE_SOURCES[number];
+
+export interface AgentBrowserStackFrame {
+  readonly url?: string;
+  readonly line?: number;
+  readonly column?: number;
+  readonly functionName?: string;
+}
+
+export interface AgentBrowserConsoleMessage {
+  readonly id: number;
+  readonly level: AgentBrowserConsoleLevel;
+  readonly source: AgentBrowserConsoleSource;
+  readonly text: string;
+  readonly timestamp: number;
+  readonly url?: string;
+  readonly line?: number;
+  readonly column?: number;
+  /** Shallow JSON-serialized arguments; present only on id drill-down. */
+  readonly args?: readonly unknown[];
+  /** Full remapped stack; present only on id drill-down. */
+  readonly stack?: readonly AgentBrowserStackFrame[];
+}
+
+export const AGENT_BROWSER_NETWORK_OUTCOMES = [
+  "pending",
+  "finished",
+  "failed",
+] as const;
+export type AgentBrowserNetworkOutcome =
+  typeof AGENT_BROWSER_NETWORK_OUTCOMES[number];
+
+export interface AgentBrowserNetworkRequest {
+  readonly id: number;
+  readonly method: string;
+  readonly url: string;
+  readonly resourceType: string;
+  readonly outcome: AgentBrowserNetworkOutcome;
+  readonly timestamp: number;
+  readonly status?: number;
+  readonly statusText?: string;
+  readonly mimeType?: string;
+  readonly encodedDataLength?: number;
+  readonly durationMs?: number;
+  readonly errorText?: string;
+  readonly requestHeaders?: Readonly<Record<string, string>>;
+  readonly responseHeaders?: Readonly<Record<string, string>>;
+  readonly requestBody?: string;
+  readonly body?: string;
+  readonly initiator?: AgentBrowserStackFrame;
+  readonly blockedReason?: string;
+}
+
+export interface AgentBrowserConsoleResult
+  extends AgentBrowserSessionResult {
+  readonly enabled: boolean;
+  readonly messages: readonly AgentBrowserConsoleMessage[];
+  readonly truncated: boolean;
+  readonly totalCount: number;
+  readonly lastId: number;
+}
+
+export interface AgentBrowserNetworkResult
+  extends AgentBrowserSessionResult {
+  readonly enabled: boolean;
+  readonly requests: readonly AgentBrowserNetworkRequest[];
+  readonly truncated: boolean;
+  readonly totalCount: number;
+  readonly lastId: number;
+}
+
+/**
+ * Restricted debug evaluation outcome. `value` is the JSON-serialized return
+ * value of the evaluated function expression; `errorText` is set when the
+ * function threw, timed out, or returned a non-serializable value.
+ */
+export interface AgentBrowserExecuteResult
+  extends AgentBrowserSessionResult {
+  readonly ok: boolean;
+  readonly value?: string;
+  readonly errorText?: string;
+}
+
 export interface AgentBrowserCloseResult {
   readonly sessionId: string;
   readonly closed: true;
@@ -300,6 +407,9 @@ export type AgentBrowserOperationResult =
   | AgentBrowserLocateResult
   | AgentBrowserScrollResult
   | AgentBrowserScreenshotResult
+  | AgentBrowserConsoleResult
+  | AgentBrowserNetworkResult
+  | AgentBrowserExecuteResult
   | AgentBrowserCloseResult;
 
 export interface AgentBrowserRequest {
@@ -429,12 +539,54 @@ export type AgentBrowserToolPayload =
       readonly sessionId: string;
       readonly text: string;
       readonly timeoutMs: number;
+    }
+  | {
+      readonly sessionId: string;
+      readonly levels?: readonly AgentBrowserConsoleLevel[];
+      readonly limit?: number;
+      readonly enable?: boolean;
+      readonly clear?: boolean;
+      readonly id?: number;
+      readonly sinceId?: number;
+    }
+  | {
+      readonly sessionId: string;
+      readonly resourceTypes?: readonly string[];
+      readonly limit?: number;
+      readonly failuresOnly?: boolean;
+      readonly enable?: boolean;
+      readonly clear?: boolean;
+      readonly id?: number;
+      readonly sinceId?: number;
+      readonly urlContains?: string;
+      readonly wait?: boolean;
+      readonly timeoutMs?: number;
+    }
+  | {
+      readonly sessionId: string;
+      readonly function: string;
+      readonly args: readonly unknown[];
+      readonly awaitPromise: boolean;
     };
 
 const MAX_ID_LENGTH = 160;
 const MAX_URL_LENGTH = 8_192;
 const MAX_TEXT_LENGTH = 20_000;
 export const MAX_AGENT_BROWSER_LOCATOR_CODE_LENGTH = 4_096;
+/** Mirrors the desktop-side buffer cap so a read can never ask for more. */
+export const MAX_AGENT_BROWSER_DEBUG_LIMIT = 200;
+/** Mirrors the desktop-side per-entry text cap. */
+const MAX_DEBUG_TEXT_LENGTH = 2_000;
+/** Upper bound for the debug evaluate function expression, in characters. */
+export const MAX_AGENT_BROWSER_DEBUG_FUNCTION_LENGTH = 8_192;
+/** Upper bound for debug evaluate JSON call arguments. */
+export const MAX_AGENT_BROWSER_DEBUG_ARGS = 16;
+/** Upper bound for each debug evaluate JSON argument, in characters. */
+export const MAX_AGENT_BROWSER_DEBUG_ARG_LENGTH = 8_192;
+/** Upper bound for the serialized debug evaluate result, in characters. */
+export const MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH = 65_536;
+/** Upper bound for `browser_network` wait timeout, matching `browser_wait`. */
+export const MAX_AGENT_BROWSER_DEBUG_WAIT_TIMEOUT_MS = 30_000;
 const MAX_ERROR_LENGTH = 2_048;
 const MAX_SNAPSHOT_NODES = 300;
 const MAX_FIND_DEPTH = 8;
@@ -890,6 +1042,129 @@ function parseAgentBrowserScrollDirection(
   return value as AgentBrowserScrollDirection;
 }
 
+function parseConsoleLevels(
+  value: unknown,
+): readonly AgentBrowserConsoleLevel[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Agent Browser console levels must be an array",
+    );
+  }
+  const levels = value.map((entry) => {
+    if (
+      typeof entry !== "string" ||
+      !(AGENT_BROWSER_CONSOLE_LEVELS as readonly string[]).includes(entry)
+    ) {
+      throw new TypeError("invalid Agent Browser console level");
+    }
+    return entry as AgentBrowserConsoleLevel;
+  });
+  if (levels.length === 0) {
+    throw new TypeError(
+      "Agent Browser console levels must not be empty",
+    );
+  }
+  return [...new Set(levels)];
+}
+
+function parseResourceTypes(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Agent Browser network resource types must be an array",
+    );
+  }
+  const types = value.map((entry) => {
+    if (typeof entry !== "string" || entry === "") {
+      throw new TypeError(
+        "invalid Agent Browser network resource type",
+      );
+    }
+    return entry;
+  });
+  if (types.length === 0) {
+    throw new TypeError(
+      "Agent Browser network resource types must not be empty",
+    );
+  }
+  return [...new Set(types)];
+}
+
+function parseDebugLimit(value: unknown, label: string): number {
+  const limit = positiveInteger(value, `Agent Browser ${label} limit`);
+  if (
+    limit === undefined || limit > MAX_AGENT_BROWSER_DEBUG_LIMIT
+  ) {
+    throw new TypeError(
+      `Agent Browser ${label} limit must be between 1 and `
+        + `${String(MAX_AGENT_BROWSER_DEBUG_LIMIT)}`,
+    );
+  }
+  return limit;
+}
+
+function parseDebugEntryId(value: unknown, label: string): number {
+  return positiveInteger(value, `Agent Browser ${label} id`);
+}
+
+function parseDebugSinceId(value: unknown, label: string): number {
+  return boundedNonNegativeInteger(
+    value,
+    `Agent Browser ${label} since_id`,
+    Number.MAX_SAFE_INTEGER,
+  );
+}
+
+function parseDebugWaitTimeout(value: unknown): number {
+  const timeoutMs = positiveInteger(
+    value,
+    "Agent Browser network wait timeout",
+  );
+  if (timeoutMs > MAX_AGENT_BROWSER_DEBUG_WAIT_TIMEOUT_MS) {
+    throw new TypeError(
+      `Agent Browser network wait timeout exceeds ${String(MAX_AGENT_BROWSER_DEBUG_WAIT_TIMEOUT_MS)} ms`,
+    );
+  }
+  return timeoutMs;
+}
+
+/**
+ * Validates JSON call arguments for debug evaluation. Each entry must be a
+ * JSON-representable value whose serialization stays within the per-argument
+ * cap, so a single call can never smuggle an oversized payload.
+ */
+function parseDebugArgs(value: unknown): readonly unknown[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Agent Browser execute args must be an array",
+    );
+  }
+  if (value.length > MAX_AGENT_BROWSER_DEBUG_ARGS) {
+    throw new TypeError(
+      `Agent Browser execute args exceed ${String(MAX_AGENT_BROWSER_DEBUG_ARGS)} entries`,
+    );
+  }
+  return value.map((entry, index) => {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(entry);
+    } catch {
+      throw new TypeError(
+        `Agent Browser execute arg at index ${String(index)} is not JSON-representable`,
+      );
+    }
+    if (
+      serialized === undefined ||
+      serialized.length > MAX_AGENT_BROWSER_DEBUG_ARG_LENGTH
+    ) {
+      throw new TypeError(
+        `Agent Browser execute arg at index ${String(index)} exceeds ${String(MAX_AGENT_BROWSER_DEBUG_ARG_LENGTH)} characters`,
+      );
+    }
+    return entry;
+  });
+}
+
 export function parseAgentBrowserToolPayload(
   operation: AgentBrowserOperation,
   value: unknown,
@@ -1103,6 +1378,188 @@ export function parseAgentBrowserToolPayload(
           2_000,
         ),
         timeoutMs,
+      };
+    }
+    case "console": {
+      if (
+        !exactKeys(
+          payload,
+          ["sessionId"],
+          ["levels", "limit", "enable", "clear", "id", "sinceId"],
+        )
+      ) {
+        throw new TypeError("invalid Agent Browser console payload");
+      }
+      if (
+        payload.enable !== undefined &&
+        typeof payload.enable !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser console enable flag",
+        );
+      }
+      if (
+        payload.clear !== undefined &&
+        typeof payload.clear !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser console clear flag",
+        );
+      }
+      return {
+        sessionId: parseAgentBrowserSessionId(payload.sessionId),
+        ...(payload.levels === undefined
+          ? {}
+          : { levels: parseConsoleLevels(payload.levels) }),
+        ...(payload.limit === undefined
+          ? {}
+          : { limit: parseDebugLimit(payload.limit, "console") }),
+        ...(payload.enable === undefined
+          ? {}
+          : { enable: payload.enable }),
+        ...(payload.clear === undefined
+          ? {}
+          : { clear: payload.clear }),
+        ...(payload.id === undefined
+          ? {}
+          : { id: parseDebugEntryId(payload.id, "console") }),
+        ...(payload.sinceId === undefined
+          ? {}
+          : { sinceId: parseDebugSinceId(payload.sinceId, "console") }),
+      };
+    }
+    case "network": {
+      if (
+        !exactKeys(
+          payload,
+          ["sessionId"],
+          [
+            "resourceTypes",
+            "limit",
+            "failuresOnly",
+            "enable",
+            "clear",
+            "id",
+            "sinceId",
+            "urlContains",
+            "wait",
+            "timeoutMs",
+          ],
+        )
+      ) {
+        throw new TypeError("invalid Agent Browser network payload");
+      }
+      if (
+        payload.failuresOnly !== undefined &&
+        typeof payload.failuresOnly !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser network failuresOnly flag",
+        );
+      }
+      if (
+        payload.enable !== undefined &&
+        typeof payload.enable !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser network enable flag",
+        );
+      }
+      if (
+        payload.clear !== undefined &&
+        typeof payload.clear !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser network clear flag",
+        );
+      }
+      if (
+        payload.wait !== undefined &&
+        typeof payload.wait !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser network wait flag",
+        );
+      }
+      const urlContains = payload.urlContains === undefined
+        ? undefined
+        : boundedString(
+          payload.urlContains,
+          "Agent Browser network url_contains",
+          MAX_URL_LENGTH,
+          true,
+        );
+      return {
+        sessionId: parseAgentBrowserSessionId(payload.sessionId),
+        ...(payload.resourceTypes === undefined
+          ? {}
+          : {
+              resourceTypes: parseResourceTypes(
+                payload.resourceTypes,
+              ),
+            }),
+        ...(payload.limit === undefined
+          ? {}
+          : { limit: parseDebugLimit(payload.limit, "network") }),
+        ...(payload.failuresOnly === undefined
+          ? {}
+          : { failuresOnly: payload.failuresOnly }),
+        ...(payload.enable === undefined
+          ? {}
+          : { enable: payload.enable }),
+        ...(payload.clear === undefined
+          ? {}
+          : { clear: payload.clear }),
+        ...(payload.id === undefined
+          ? {}
+          : { id: parseDebugEntryId(payload.id, "network") }),
+        ...(payload.sinceId === undefined
+          ? {}
+          : { sinceId: parseDebugSinceId(payload.sinceId, "network") }),
+        ...(urlContains === undefined ? {} : { urlContains }),
+        ...(payload.wait === undefined
+          ? {}
+          : { wait: payload.wait }),
+        ...(payload.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: parseDebugWaitTimeout(payload.timeoutMs) }),
+      };
+    }
+    case "execute": {
+      if (
+        !exactKeys(
+          payload,
+          ["sessionId", "function"],
+          ["args", "awaitPromise"],
+        )
+      ) {
+        throw new TypeError("invalid Agent Browser execute payload");
+      }
+      const fn = boundedString(
+        payload.function,
+        "Agent Browser execute function",
+        MAX_AGENT_BROWSER_DEBUG_FUNCTION_LENGTH,
+      );
+      if (fn.trim() === "") {
+        throw new TypeError(
+          "Agent Browser execute function must not be empty",
+        );
+      }
+      if (
+        payload.awaitPromise !== undefined &&
+        typeof payload.awaitPromise !== "boolean"
+      ) {
+        throw new TypeError(
+          "invalid Agent Browser execute awaitPromise flag",
+        );
+      }
+      return {
+        sessionId: parseAgentBrowserSessionId(payload.sessionId),
+        function: fn,
+        args: parseDebugArgs(payload.args),
+        awaitPromise:
+          payload.awaitPromise === undefined ||
+          payload.awaitPromise,
       };
     }
   }
@@ -1784,6 +2241,342 @@ function parseLocatedSnapshotNode(
   };
 }
 
+function parseStackFrames(
+  value: unknown,
+  label: string,
+): readonly AgentBrowserStackFrame[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} must be an array`);
+  }
+  return value.map((entry, index) => {
+    const frame = record(entry, `${label} at index ${String(index)}`);
+    if (
+      !exactKeys(frame, [], ["url", "line", "column", "functionName"])
+    ) {
+      throw new TypeError(`invalid ${label} at index ${String(index)}`);
+    }
+    const url = frame.url === undefined
+      ? undefined
+      : boundedString(frame.url, `${label} url`, MAX_URL_LENGTH);
+    const line = frame.line === undefined
+      ? undefined
+      : boundedFiniteNumber(
+        frame.line,
+        `${label} line`,
+        Number.MIN_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER,
+      );
+    const column = frame.column === undefined
+      ? undefined
+      : boundedFiniteNumber(
+        frame.column,
+        `${label} column`,
+        Number.MIN_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER,
+      );
+    const functionName = frame.functionName === undefined
+      ? undefined
+      : boundedString(
+        frame.functionName,
+        `${label} functionName`,
+        500,
+        true,
+      );
+    return {
+      ...(url === undefined ? {} : { url }),
+      ...(line === undefined ? {} : { line }),
+      ...(column === undefined ? {} : { column }),
+      ...(functionName === undefined ? {} : { functionName }),
+    };
+  });
+}
+
+function parseHeaderRecord(
+  value: unknown,
+  label: string,
+): Readonly<Record<string, string>> {
+  const headers = record(value, label);
+  const parsed: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(headers)) {
+    parsed[key] = boundedString(
+      entry,
+      `${label} ${key}`,
+      MAX_DEBUG_TEXT_LENGTH,
+      true,
+    );
+  }
+  return parsed;
+}
+
+function parseJsonArgs(
+  value: unknown,
+  label: string,
+): readonly unknown[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(`${label} must be an array`);
+  }
+  return value.map((entry, index) => {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(entry);
+    } catch {
+      throw new TypeError(
+        `${label} at index ${String(index)} is not JSON-representable`,
+      );
+    }
+    if (
+      serialized === undefined ||
+      serialized.length > MAX_DEBUG_TEXT_LENGTH
+    ) {
+      throw new TypeError(
+        `${label} at index ${String(index)} exceeds ${String(MAX_DEBUG_TEXT_LENGTH)} characters`,
+      );
+    }
+    return entry;
+  });
+}
+
+function parseConsoleMessages(
+  value: unknown,
+): readonly AgentBrowserConsoleMessage[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Agent Browser console messages must be an array",
+    );
+  }
+  return value.map((entry, index) => {
+    const message = record(entry, "Agent Browser console message");
+    if (
+      !exactKeys(
+        message,
+        ["id", "level", "source", "text", "timestamp"],
+        ["url", "line", "column", "args", "stack"],
+      )
+    ) {
+      throw new TypeError(
+        `invalid Agent Browser console message at index ${String(index)}`,
+      );
+    }
+    const level = message.level;
+    const source = message.source;
+    if (
+      typeof level !== "string" ||
+      !(AGENT_BROWSER_CONSOLE_LEVELS as readonly string[]).includes(level)
+    ) {
+      throw new TypeError(
+        `invalid Agent Browser console level at index ${String(index)}`,
+      );
+    }
+    if (
+      typeof source !== "string" ||
+      !(AGENT_BROWSER_CONSOLE_SOURCES as readonly string[]).includes(source)
+    ) {
+      throw new TypeError(
+        `invalid Agent Browser console source at index ${String(index)}`,
+      );
+    }
+    const url = typeof message.url === "string" && message.url !== ""
+      ? boundedString(
+        message.url,
+        "Agent Browser console url",
+        MAX_URL_LENGTH,
+      )
+      : undefined;
+    const line = typeof message.line === "number" &&
+        Number.isFinite(message.line)
+      ? message.line
+      : undefined;
+    const column = typeof message.column === "number" &&
+        Number.isFinite(message.column)
+      ? message.column
+      : undefined;
+    const args = message.args === undefined
+      ? undefined
+      : parseJsonArgs(message.args, "Agent Browser console args");
+    const stack = message.stack === undefined
+      ? undefined
+      : parseStackFrames(message.stack, "Agent Browser console stack");
+    return {
+      id: positiveInteger(
+        message.id,
+        "Agent Browser console message id",
+      ) ?? index,
+      level: level as AgentBrowserConsoleLevel,
+      source: source as AgentBrowserConsoleSource,
+      text: boundedString(
+        message.text,
+        "Agent Browser console text",
+        MAX_DEBUG_TEXT_LENGTH,
+      ),
+      timestamp: positiveInteger(
+        message.timestamp,
+        "Agent Browser console timestamp",
+      ) ?? 0,
+      ...(url === undefined ? {} : { url }),
+      ...(line === undefined ? {} : { line }),
+      ...(column === undefined ? {} : { column }),
+      ...(args === undefined ? {} : { args }),
+      ...(stack === undefined ? {} : { stack }),
+    };
+  });
+}
+
+function parseNetworkRequests(
+  value: unknown,
+): readonly AgentBrowserNetworkRequest[] {
+  if (!Array.isArray(value)) {
+    throw new TypeError(
+      "Agent Browser network requests must be an array",
+    );
+  }
+  return value.map((entry, index) => {
+    const request = record(entry, "Agent Browser network request");
+    if (
+      !exactKeys(
+        request,
+        [
+          "id",
+          "method",
+          "url",
+          "resourceType",
+          "outcome",
+          "timestamp",
+        ],
+        [
+          "status",
+          "statusText",
+          "mimeType",
+          "encodedDataLength",
+          "durationMs",
+          "errorText",
+          "requestHeaders",
+          "responseHeaders",
+          "requestBody",
+          "body",
+          "initiator",
+          "blockedReason",
+        ],
+      )
+    ) {
+      throw new TypeError(
+        `invalid Agent Browser network request at index ${String(index)}`,
+      );
+    }
+    const outcome = request.outcome;
+    if (
+      typeof outcome !== "string" ||
+      !(AGENT_BROWSER_NETWORK_OUTCOMES as readonly string[]).includes(
+        outcome,
+      )
+    ) {
+      throw new TypeError(
+        `invalid Agent Browser network outcome at index ${String(index)}`,
+      );
+    }
+    const text = (
+      key: "statusText" | "mimeType" | "errorText",
+    ): string | undefined => {
+      const candidate = request[key];
+      return typeof candidate === "string" && candidate !== ""
+        ? candidate
+        : undefined;
+    };
+    const number = (
+      key: "status" | "encodedDataLength" | "durationMs",
+    ): number | undefined => {
+      const candidate = request[key];
+      return typeof candidate === "number" && Number.isFinite(candidate)
+        ? candidate
+        : undefined;
+    };
+    const statusText = text("statusText");
+    const mimeType = text("mimeType");
+    const errorText = text("errorText");
+    const status = number("status");
+    const encodedDataLength = number("encodedDataLength");
+    const durationMs = number("durationMs");
+    const requestBody = request.requestBody === undefined
+      ? undefined
+      : boundedString(
+        request.requestBody,
+        "Agent Browser network requestBody",
+        MAX_DEBUG_TEXT_LENGTH,
+        true,
+      );
+    const body = request.body === undefined
+      ? undefined
+      : boundedString(
+        request.body,
+        "Agent Browser network body",
+        MAX_DEBUG_TEXT_LENGTH,
+        true,
+      );
+    const blockedReason = request.blockedReason === undefined
+      ? undefined
+      : boundedString(
+        request.blockedReason,
+        "Agent Browser network blockedReason",
+        200,
+      );
+    const requestHeaders = request.requestHeaders === undefined
+      ? undefined
+      : parseHeaderRecord(
+        request.requestHeaders,
+        "Agent Browser network requestHeaders",
+      );
+    const responseHeaders = request.responseHeaders === undefined
+      ? undefined
+      : parseHeaderRecord(
+        request.responseHeaders,
+        "Agent Browser network responseHeaders",
+      );
+    const initiator = request.initiator === undefined
+      ? undefined
+      : parseStackFrames(
+        [request.initiator],
+        "Agent Browser network initiator",
+      )[0];
+    return {
+      id: positiveInteger(
+        request.id,
+        "Agent Browser network request id",
+      ) ?? index,
+      method: boundedString(
+        request.method,
+        "Agent Browser network method",
+        32,
+      ),
+      url: boundedString(
+        request.url,
+        "Agent Browser network url",
+        MAX_URL_LENGTH,
+      ),
+      resourceType: boundedString(
+        request.resourceType,
+        "Agent Browser network resource type",
+        64,
+      ),
+      outcome: outcome as AgentBrowserNetworkOutcome,
+      timestamp: positiveInteger(
+        request.timestamp,
+        "Agent Browser network timestamp",
+      ) ?? 0,
+      ...(status === undefined ? {} : { status }),
+      ...(statusText === undefined ? {} : { statusText }),
+      ...(mimeType === undefined ? {} : { mimeType }),
+      ...(encodedDataLength === undefined ? {} : { encodedDataLength }),
+      ...(durationMs === undefined ? {} : { durationMs }),
+      ...(errorText === undefined ? {} : { errorText }),
+      ...(requestHeaders === undefined ? {} : { requestHeaders }),
+      ...(responseHeaders === undefined ? {} : { responseHeaders }),
+      ...(requestBody === undefined ? {} : { requestBody }),
+      ...(body === undefined ? {} : { body }),
+      ...(initiator === undefined ? {} : { initiator }),
+      ...(blockedReason === undefined ? {} : { blockedReason }),
+    };
+  });
+}
+
 export function parseAgentBrowserOperationResult(
   operation: AgentBrowserOperation,
   value: unknown,
@@ -2166,6 +2959,167 @@ export function parseAgentBrowserOperationResult(
       }),
       mimeType: "image/png",
       data,
+    };
+  }
+  if (operation === "console") {
+    const result = record(value, "Agent Browser console result");
+    if (
+      !exactKeys(
+        result,
+        [
+          "sessionId",
+          "generation",
+          "owner",
+          "status",
+          "snapshotRequired",
+          "enabled",
+          "messages",
+          "truncated",
+          "totalCount",
+          "lastId",
+        ],
+        ["url", "title"],
+      ) ||
+      typeof result.enabled !== "boolean" ||
+      typeof result.truncated !== "boolean"
+    ) {
+      throw new TypeError("invalid Agent Browser console result");
+    }
+    return {
+      ...parseSessionResult({
+        sessionId: result.sessionId,
+        generation: result.generation,
+        owner: result.owner,
+        status: result.status,
+        snapshotRequired: result.snapshotRequired,
+        ...(result.url === undefined ? {} : { url: result.url }),
+        ...(result.title === undefined
+          ? {}
+          : { title: result.title }),
+      }),
+      enabled: result.enabled,
+      messages: parseConsoleMessages(result.messages),
+      truncated: result.truncated,
+      totalCount: boundedNonNegativeInteger(
+        result.totalCount,
+        "Agent Browser console message count",
+        MAX_AGENT_BROWSER_DEBUG_LIMIT,
+      ),
+      lastId: boundedNonNegativeInteger(
+        result.lastId,
+        "Agent Browser console last_id",
+        Number.MAX_SAFE_INTEGER,
+      ),
+    };
+  }
+  if (operation === "network") {
+    const result = record(value, "Agent Browser network result");
+    if (
+      !exactKeys(
+        result,
+        [
+          "sessionId",
+          "generation",
+          "owner",
+          "status",
+          "snapshotRequired",
+          "enabled",
+          "requests",
+          "truncated",
+          "totalCount",
+          "lastId",
+        ],
+        ["url", "title"],
+      ) ||
+      typeof result.enabled !== "boolean" ||
+      typeof result.truncated !== "boolean"
+    ) {
+      throw new TypeError("invalid Agent Browser network result");
+    }
+    return {
+      ...parseSessionResult({
+        sessionId: result.sessionId,
+        generation: result.generation,
+        owner: result.owner,
+        status: result.status,
+        snapshotRequired: result.snapshotRequired,
+        ...(result.url === undefined ? {} : { url: result.url }),
+        ...(result.title === undefined
+          ? {}
+          : { title: result.title }),
+      }),
+      enabled: result.enabled,
+      requests: parseNetworkRequests(result.requests),
+      truncated: result.truncated,
+      totalCount: boundedNonNegativeInteger(
+        result.totalCount,
+        "Agent Browser network request count",
+        MAX_AGENT_BROWSER_DEBUG_LIMIT,
+      ),
+      lastId: boundedNonNegativeInteger(
+        result.lastId,
+        "Agent Browser network last_id",
+        Number.MAX_SAFE_INTEGER,
+      ),
+    };
+  }
+  if (operation === "execute") {
+    const result = record(value, "Agent Browser execute result");
+    if (
+      !exactKeys(
+        result,
+        [
+          "sessionId",
+          "generation",
+          "owner",
+          "status",
+          "snapshotRequired",
+          "ok",
+        ],
+        ["url", "title", "value", "errorText"],
+      ) ||
+      typeof result.ok !== "boolean"
+    ) {
+      throw new TypeError("invalid Agent Browser execute result");
+    }
+    if (
+      (result.value === undefined) === (result.errorText === undefined)
+    ) {
+      throw new TypeError(
+        "Agent Browser execute result must carry exactly one of value or errorText",
+      );
+    }
+    return {
+      ...parseSessionResult({
+        sessionId: result.sessionId,
+        generation: result.generation,
+        owner: result.owner,
+        status: result.status,
+        snapshotRequired: result.snapshotRequired,
+        ...(result.url === undefined ? {} : { url: result.url }),
+        ...(result.title === undefined
+          ? {}
+          : { title: result.title }),
+      }),
+      ok: result.ok,
+      ...(result.value === undefined
+        ? {}
+        : {
+            value: boundedString(
+              result.value,
+              "Agent Browser execute value",
+              MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
+            ),
+          }),
+      ...(result.errorText === undefined
+        ? {}
+        : {
+            errorText: boundedString(
+              result.errorText,
+              "Agent Browser execute errorText",
+              MAX_AGENT_BROWSER_DEBUG_VALUE_LENGTH,
+            ),
+          }),
     };
   }
   return parseSessionResult(value);
