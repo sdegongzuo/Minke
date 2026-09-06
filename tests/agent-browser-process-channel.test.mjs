@@ -9,7 +9,7 @@ import {
 } from "@minke/harness-overlay/agent-browser-contract.ts";
 import {
   AgentBrowserProcessChannel,
-} from "@minke/desktop/main/agent-browser/index.ts";
+} from "@minke/desktop/main/agent-browser/process-channel.ts";
 
 async function settleAsyncWork() {
   await new Promise((resolve) => setImmediate(resolve));

@@ -7,7 +7,7 @@ import test from "node:test";
 import {
   SqliteAgentBrowserHistory,
   agentBrowserHistoryFilePath,
-} from "@minke/desktop/main/agent-browser/index.ts";
+} from "@minke/desktop/main/agent-browser/history.ts";
 
 async function createVersionOneHistoryDatabase(path) {
   await mkdir(dirname(path), { recursive: true });

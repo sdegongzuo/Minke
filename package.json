@@ -30,6 +30,7 @@
     "test:desktop:host": "node scripts/tests/desktop.mjs host",
     "test:desktop:about-layout": "electron tests/about-update-layout-runtime.cjs",
     "test:desktop:agent-browser-runtime": "electron tests/agent-browser-runtime.cjs",
+    "test:desktop:agent-browser-popout": "electron tests/agent-browser-popout-runtime.cjs",
     "test:desktop:web-tab-links-runtime": "pnpm run build:preload && electron tests/web-tab-links-runtime.cjs",
     "test:desktop:agent-browser-conversation": "pnpm run build:preload && pnpm run harness:stage:ensure && pnpm run test:desktop:agent-browser-conversation:prepared",
     "test:desktop:agent-browser-conversation:prepared": "node scripts/tests/agent-browser-conversation.mjs",

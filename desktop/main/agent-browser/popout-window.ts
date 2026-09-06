@@ -45,6 +45,8 @@ export interface AgentBrowserPopoutRuntimeOptions {
   minkeConfigPath: string;
   environment: NodeJS.ProcessEnv;
   prepareWebSession(): void;
+  /** Test seam; production uses MAX_AGENT_BROWSER_POPOUTS. */
+  readonly limit?: number;
 }
 
 interface AgentBrowserPopoutEntry {
@@ -112,7 +114,7 @@ export class AgentBrowserPopoutRuntime {
 
   /** How many popout windows may exist at once. */
   get limit(): number {
-    return MAX_AGENT_BROWSER_POPOUTS;
+    return this.#options.limit ?? MAX_AGENT_BROWSER_POPOUTS;
   }
 
   /**
@@ -137,15 +139,6 @@ export class AgentBrowserPopoutRuntime {
       );
     }
     if (
-      this.#popouts.size + this.#reservations.size >=
-      MAX_AGENT_BROWSER_POPOUTS
-    ) {
-      throw new AgentBrowserError(
-        "popout_limit_reached",
-        `Agent Browser popout window limit (${String(MAX_AGENT_BROWSER_POPOUTS)}) reached`,
-      );
-    }
-    if (
       this.#reservations.has(sessionId) ||
       [...this.#popouts.values()].some(
         (entry) => entry.sessionId === sessionId,
@@ -154,6 +147,15 @@ export class AgentBrowserPopoutRuntime {
       throw new AgentBrowserError(
         "popout_exists",
         "Agent Browser session is already popped out",
+      );
+    }
+    if (
+      this.#popouts.size + this.#reservations.size >=
+      this.limit
+    ) {
+      throw new AgentBrowserError(
+        "popout_limit_reached",
+        `Agent Browser popout window limit (${String(this.limit)}) reached`,
       );
     }
     this.#reservations.add(sessionId);
@@ -248,19 +250,42 @@ export class AgentBrowserPopoutRuntime {
       tabsBinding,
     });
     this.#protectNavigation(window);
-    window.once("closed", () => {
-      this.#options.embedders.unregister(window.webContents);
-      this.#popouts.delete(window.webContents);
-      tabsBinding.dispose();
+    // Intercept close: detach the guest through the runtime's relocation
+    // lifecycle (releasing the debugger) before the window tears down its
+    // renderer; destroying a window that still hosts a debugged guest can
+    // block the main process.
+    let closing = false;
+    window.on("close", (event) => {
+      if (closing) return;
+      closing = true;
+      event.preventDefault();
       void this.#options.agentBrowser
         .beginRelocation(sessionId, "sidebar")
         .catch(() => {
           // The session may already be closed; nothing to send home.
+        })
+        .then(() => {
+          this.#releasePopout(window, tabsBinding);
+          if (!window.isDestroyed()) {
+            window.destroy();
+          }
         });
+    });
+    window.once("closed", () => {
+      this.#releasePopout(window, tabsBinding);
     });
     window.once("ready-to-show", () => window.show());
     await this.#loadPopoutPage(window, sessionId);
     return window;
+  }
+
+  #releasePopout(
+    window: BrowserWindow,
+    tabsBinding: TabsBinding,
+  ): void {
+    this.#options.embedders.unregister(window.webContents);
+    this.#popouts.delete(window.webContents);
+    tabsBinding.dispose();
   }
 
   async #loadPopoutPage(

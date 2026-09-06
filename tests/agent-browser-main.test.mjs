@@ -27,9 +27,11 @@ import {
   AGENT_BROWSER_ANNOTATION_STOP_CHANNEL,
 } from "@minke/harness-overlay/agent-browser-annotation-contract.ts";
 import {
-  AgentBrowserProcessChannel,
   AgentBrowserRuntime,
-} from "@minke/desktop/main/agent-browser/index.ts";
+} from "@minke/desktop/main/agent-browser/runtime.ts";
+import {
+  AgentBrowserProcessChannel,
+} from "@minke/desktop/main/agent-browser/process-channel.ts";
 import {
   DEBUG_EXECUTE_WRAPPER_FUNCTION,
   DEBUG_TRUNCATION_SUFFIX,
