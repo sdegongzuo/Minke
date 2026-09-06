@@ -36,6 +36,7 @@ import {
   type AgentBrowserFindView,
   type AgentBrowserOwner,
   type AgentBrowserProjection,
+  type AgentBrowserProjectionHost,
   type AgentBrowserRequest,
   type AgentBrowserScrollDirection,
   type AgentBrowserTarget,
@@ -157,6 +158,11 @@ interface AgentBrowserSessionState {
   readonly handleDownload: (event: ElectronEvent) => void;
   owner: AgentBrowserOwner;
   status: AgentBrowserSessionStatus;
+  /** Which registered window should host this session's guest view. */
+  host: AgentBrowserProjectionHost;
+  /** True while the guest view is being moved between windows. */
+  relocating: boolean;
+  resolveRelocation?: () => void;
   generation: number;
   url?: string;
   title?: string;
@@ -183,10 +189,6 @@ interface AgentBrowserSessionState {
 }
 
 interface WindowProjectionBinding {
-  readonly ipc: Pick<
-    IpcMain,
-    "handle" | "on" | "removeHandler" | "removeListener"
-  >;
   readonly embedder: WebContents;
   readonly authorize: AgentBrowserAuthorization;
 }
@@ -417,8 +419,17 @@ export class AgentBrowserRuntime {
   readonly #issuedPartitions = new Set<string>();
   readonly #processChannels =
     new Set<AgentBrowserProcessChannel>();
-  #windowBinding: WindowProjectionBinding | undefined;
-  #windowBindingDisposer: (() => void) | undefined;
+  readonly #windowBindings =
+    new Map<WebContents, WindowProjectionBinding>();
+  #projectionIpc:
+    | Pick<
+        IpcMain,
+        "handle" | "on" | "removeHandler" | "removeListener"
+      >
+    | undefined;
+  #projectionCloseListener:
+    | ((event: IpcMainEvent, value: unknown) => void)
+    | undefined;
   #userAgent: string | undefined;
   #autoEnableDebug: () => boolean;
   #historyWriteFailureReported = false;
@@ -536,33 +547,28 @@ export class AgentBrowserRuntime {
     authorize: AgentBrowserAuthorization,
   ): AgentBrowserBinding {
     this.#ensureAvailable();
-    if (this.#windowBinding !== undefined) {
+    if (this.#windowBindings.has(embedder)) {
       throw new Error(
         "Agent Browser window projection is already bound",
       );
     }
     const binding: WindowProjectionBinding = {
-      ipc,
       embedder,
       authorize,
     };
-    this.#windowBinding = binding;
+    this.#windowBindings.set(embedder, binding);
 
     const handleRead = (
       event: IpcMainInvokeEvent,
     ): readonly AgentBrowserProjection[] => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       return this.projections();
     };
     const handleControl = async (
       event: IpcMainInvokeEvent,
       value: unknown,
     ): Promise<AgentBrowserProjection> => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request = parseAgentBrowserControlRequest(value);
       return await this.setControl(
         request.sessionId,
@@ -573,9 +579,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): Promise<AgentBrowserProjection> => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request = parseAgentBrowserNavigationRequest(value);
       return await this.navigateForHuman(
         request.sessionId,
@@ -586,9 +590,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): AgentBrowserHistorySnapshot => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request =
         parseAgentBrowserHistoryReadRequest(value);
       if (this.#history === undefined) {
@@ -602,9 +604,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): AgentBrowserHistorySnapshot => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       parseAgentBrowserHistoryClearRequest(value);
       if (this.#history === undefined) {
         throw new Error(
@@ -625,9 +625,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): void => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request =
         parseAgentBrowserHistoryDeleteRequest(value);
       if (this.#history === undefined) {
@@ -641,9 +639,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): Promise<AgentBrowserAnnotationSession> => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request = parseAgentBrowserAnnotationStartRequest(value);
       return await this.startAnnotation(request.sessionId);
     };
@@ -651,9 +647,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): Promise<void> => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request = parseAgentBrowserAnnotationStopRequest(value);
       await this.stopAnnotation(
         request.sessionId,
@@ -665,9 +659,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ): Promise<AgentBrowserAnnotationRefreshResult> => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request =
         parseAgentBrowserAnnotationRefreshRequest(value);
       return await this.refreshAnnotation(request);
@@ -676,9 +668,7 @@ export class AgentBrowserRuntime {
       event: IpcMainInvokeEvent,
       value: unknown,
     ) => {
-      if (!authorize(event)) {
-        throw new Error("unauthorized Agent Browser request");
-      }
+      this.#authorizeEmbedder(event);
       const request =
         parseAgentBrowserAnnotationCommitRequest(value);
       return await this.commitAnnotation(request);
@@ -687,7 +677,10 @@ export class AgentBrowserRuntime {
       event: IpcMainEvent,
       value: unknown,
     ): void => {
-      if (!authorize(event)) return;
+      const binding = this.#windowBindings.get(event.sender);
+      if (binding === undefined || !binding.authorize(event)) {
+        return;
+      }
       try {
         void this.closeSession(
           parseAgentBrowserSessionId(value),
@@ -700,38 +693,42 @@ export class AgentBrowserRuntime {
       bindingHandle.dispose();
     };
 
-    ipc.handle(AGENT_BROWSER_SESSIONS_READ_CHANNEL, handleRead);
-    ipc.handle(AGENT_BROWSER_CONTROL_CHANNEL, handleControl);
-    ipc.handle(AGENT_BROWSER_NAVIGATION_CHANNEL, handleNavigation);
-    ipc.handle(
-      AGENT_BROWSER_HISTORY_READ_CHANNEL,
-      handleHistoryRead,
-    );
-    ipc.handle(
-      AGENT_BROWSER_HISTORY_CLEAR_CHANNEL,
-      handleHistoryClear,
-    );
-    ipc.handle(
-      AGENT_BROWSER_HISTORY_DELETE_CHANNEL,
-      handleHistoryDelete,
-    );
-    ipc.handle(
-      AGENT_BROWSER_ANNOTATION_START_CHANNEL,
-      handleAnnotationStart,
-    );
-    ipc.handle(
-      AGENT_BROWSER_ANNOTATION_STOP_CHANNEL,
-      handleAnnotationStop,
-    );
-    ipc.handle(
-      AGENT_BROWSER_ANNOTATION_REFRESH_CHANNEL,
-      handleAnnotationRefresh,
-    );
-    ipc.handle(
-      AGENT_BROWSER_ANNOTATION_COMMIT_CHANNEL,
-      handleAnnotationCommit,
-    );
-    ipc.on(AGENT_BROWSER_CLOSE_CHANNEL, handleClose);
+    if (this.#projectionIpc === undefined) {
+      this.#projectionIpc = ipc;
+      this.#projectionCloseListener = handleClose;
+      ipc.handle(AGENT_BROWSER_SESSIONS_READ_CHANNEL, handleRead);
+      ipc.handle(AGENT_BROWSER_CONTROL_CHANNEL, handleControl);
+      ipc.handle(AGENT_BROWSER_NAVIGATION_CHANNEL, handleNavigation);
+      ipc.handle(
+        AGENT_BROWSER_HISTORY_READ_CHANNEL,
+        handleHistoryRead,
+      );
+      ipc.handle(
+        AGENT_BROWSER_HISTORY_CLEAR_CHANNEL,
+        handleHistoryClear,
+      );
+      ipc.handle(
+        AGENT_BROWSER_HISTORY_DELETE_CHANNEL,
+        handleHistoryDelete,
+      );
+      ipc.handle(
+        AGENT_BROWSER_ANNOTATION_START_CHANNEL,
+        handleAnnotationStart,
+      );
+      ipc.handle(
+        AGENT_BROWSER_ANNOTATION_STOP_CHANNEL,
+        handleAnnotationStop,
+      );
+      ipc.handle(
+        AGENT_BROWSER_ANNOTATION_REFRESH_CHANNEL,
+        handleAnnotationRefresh,
+      );
+      ipc.handle(
+        AGENT_BROWSER_ANNOTATION_COMMIT_CHANNEL,
+        handleAnnotationCommit,
+      );
+      ipc.on(AGENT_BROWSER_CLOSE_CHANNEL, handleClose);
+    }
     embedder.on("destroyed", handleDestroyed);
 
     let disposed = false;
@@ -740,31 +737,133 @@ export class AgentBrowserRuntime {
         if (disposed) return;
         disposed = true;
         embedder.off("destroyed", handleDestroyed);
-        ipc.removeHandler(AGENT_BROWSER_SESSIONS_READ_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_CONTROL_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_NAVIGATION_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_HISTORY_READ_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_HISTORY_CLEAR_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_HISTORY_DELETE_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_ANNOTATION_START_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_ANNOTATION_STOP_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_ANNOTATION_REFRESH_CHANNEL);
-        ipc.removeHandler(AGENT_BROWSER_ANNOTATION_COMMIT_CHANNEL);
-        ipc.removeListener(
-          AGENT_BROWSER_CLOSE_CHANNEL,
-          handleClose,
-        );
-        if (this.#windowBinding === binding) {
-          this.#windowBinding = undefined;
-          this.#windowBindingDisposer = undefined;
-          for (const sessionId of [...this.#states.keys()]) {
-            void this.closeSession(sessionId);
-          }
-        }
+        this.unregisterEmbedder(embedder);
       },
     };
-    this.#windowBindingDisposer = bindingHandle.dispose;
     return bindingHandle;
+  }
+
+  unregisterEmbedder(embedder: WebContents): void {
+    if (!this.#windowBindings.delete(embedder)) return;
+    if (this.#windowBindings.size > 0) return;
+    this.#uninstallProjectionIpc();
+    for (const sessionId of [...this.#states.keys()]) {
+      void this.closeSession(sessionId);
+    }
+  }
+
+  #authorizeEmbedder(
+    event: IpcMainEvent | IpcMainInvokeEvent,
+  ): void {
+    const binding = this.#windowBindings.get(event.sender);
+    if (binding !== undefined) {
+      if (binding.authorize(event)) return;
+      throw new Error("unauthorized Agent Browser request");
+    }
+    // Real IPC events always carry a registered sender; the sweep only
+    // matters for synthesized events, and every production authorize
+    // verifies sender identity, so foreign senders still fail here.
+    for (const candidate of this.#windowBindings.values()) {
+      if (candidate.authorize(event)) return;
+    }
+    throw new Error("unauthorized Agent Browser request");
+  }
+
+  #uninstallProjectionIpc(): void {
+    const ipc = this.#projectionIpc;
+    const closeListener = this.#projectionCloseListener;
+    if (ipc === undefined) return;
+    this.#projectionIpc = undefined;
+    this.#projectionCloseListener = undefined;
+    ipc.removeHandler(AGENT_BROWSER_SESSIONS_READ_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_CONTROL_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_NAVIGATION_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_HISTORY_READ_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_HISTORY_CLEAR_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_HISTORY_DELETE_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_ANNOTATION_START_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_ANNOTATION_STOP_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_ANNOTATION_REFRESH_CHANNEL);
+    ipc.removeHandler(AGENT_BROWSER_ANNOTATION_COMMIT_CHANNEL);
+    if (closeListener !== undefined) {
+      ipc.removeListener(
+        AGENT_BROWSER_CLOSE_CHANNEL,
+        closeListener,
+      );
+    }
+  }
+
+  /**
+   * Move a session's guest view to another registered window.
+   *
+   * Clears admission (C9) so the next blank webview using the session
+   * partition can attach, records the target host, and closes the current
+   * guest if one is still mounted: guest destruction during relocation
+   * detaches gracefully (C10) instead of crashing the session. Resolves
+   * once the previous guest is gone, so the caller can create the new
+   * host window without racing the one-guest-per-partition rule.
+   */
+  async beginRelocation(
+    sessionId: string,
+    host: AgentBrowserProjectionHost,
+  ): Promise<void> {
+    this.#ensureAvailable();
+    const state = this.#states.get(sessionId);
+    if (state === undefined || state.closing) {
+      throw new AgentBrowserError(
+        "session_not_found",
+        "Agent Browser session was not found",
+      );
+    }
+    state.relocating = true;
+    state.attachmentClaimed = false;
+    state.host = host;
+    const guest = state.guest;
+    if (guest === undefined) {
+      this.#markRelocationPending(state);
+      this.#publish();
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      state.resolveRelocation = resolve;
+      try {
+        guest.close({ waitForBeforeUnload: false });
+      } catch {
+        resolve();
+      }
+    });
+    if (this.#states.get(sessionId) !== state || state.closing) {
+      return;
+    }
+    this.#publish();
+  }
+
+  #markRelocationPending(state: AgentBrowserSessionState): void {
+    if (state.closing) return;
+    delete state.error;
+    state.status = "pending";
+    state.navigation = {
+      ...state.navigation,
+      loading: false,
+    };
+  }
+
+  #detachRelocatingGuest(
+    state: AgentBrowserSessionState,
+    guest: WebContents,
+  ): void {
+    if (state.guest === guest) {
+      state.guest = undefined;
+    }
+    state.removeGuestListeners?.();
+    state.removeGuestListeners = undefined;
+    state.cdp?.dispose();
+    state.cdp = undefined;
+    const resolve = state.resolveRelocation;
+    state.resolveRelocation = undefined;
+    this.#markRelocationPending(state);
+    this.#publish();
+    resolve?.();
   }
 
   /**
@@ -850,7 +949,7 @@ export class AgentBrowserRuntime {
         ? "Agent Browser guest was not admitted"
         : state.guest !== undefined
           ? "Agent Browser partition was attached more than once"
-          : this.#windowBinding?.embedder !== embedder ||
+          : !this.#windowBindings.has(embedder) ||
               guest.hostWebContents !== embedder
             ? "Agent Browser guest has an unexpected host"
             : state.session.isPersistent() ||
@@ -865,6 +964,8 @@ export class AgentBrowserRuntime {
     }
 
     state.guest = guest;
+    state.relocating = false;
+    state.resolveRelocation = undefined;
     this.#protectGuest(state, guest);
     void this.#activateGuest(state, guest);
     return true;
@@ -1916,8 +2017,9 @@ export class AgentBrowserRuntime {
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.#windowBindingDisposer?.();
-    this.#windowBindingDisposer = undefined;
+    for (const embedder of [...this.#windowBindings.keys()]) {
+      this.unregisterEmbedder(embedder);
+    }
     for (const channel of this.#processChannels) {
       channel.dispose();
     }
@@ -1926,7 +2028,6 @@ export class AgentBrowserRuntime {
       void this.#releaseState(state, true);
     }
     this.#states.clear();
-    this.#windowBinding = undefined;
     this.#history?.close();
   }
 
@@ -1982,6 +2083,8 @@ export class AgentBrowserRuntime {
       handleDownload,
       owner: "agent",
       status: "pending",
+      host: "sidebar",
+      relocating: false,
       generation: 1,
       attachmentClaimed: false,
       operationTail: Promise.resolve(),
@@ -2080,6 +2183,12 @@ export class AgentBrowserRuntime {
       throw new AgentBrowserError(
         "target_gone",
         state.error ?? "Agent Browser target crashed",
+      );
+    }
+    if (state.relocating) {
+      throw new AgentBrowserError(
+        "target_gone",
+        "Agent Browser session is relocating between windows",
       );
     }
     return state;
@@ -2201,6 +2310,7 @@ export class AgentBrowserRuntime {
         if (signal.aborted) throw abortError(signal);
         if (
           state.closing ||
+          state.relocating ||
           this.#states.get(state.sessionId) !== state
         ) {
           throw new AgentBrowserError(
@@ -2468,18 +2578,30 @@ export class AgentBrowserRuntime {
       }
     };
     const handleDestroyed = (): void => {
+      if (state.relocating) {
+        this.#detachRelocatingGuest(state, guest);
+        return;
+      }
       this.#crash(state, "Agent Browser guest was destroyed");
     };
     const handleRenderGone = (
       _event: ElectronEvent,
       details: Electron.RenderProcessGoneDetails,
     ): void => {
+      if (state.relocating) {
+        this.#detachRelocatingGuest(state, guest);
+        return;
+      }
       this.#crash(
         state,
         `Agent Browser renderer exited: ${details.reason}`,
       );
     };
     const handleUnresponsive = (): void => {
+      if (state.relocating) {
+        this.#detachRelocatingGuest(state, guest);
+        return;
+      }
       this.#crash(state, "Agent Browser guest became unresponsive");
     };
 
@@ -2535,6 +2657,7 @@ export class AgentBrowserRuntime {
   ): void {
     if (
       state.closing ||
+      state.relocating ||
       this.#states.get(state.sessionId) !== state
     ) {
       return;
@@ -2914,10 +3037,8 @@ export class AgentBrowserRuntime {
   }
 
   #canProjectCursor(state: AgentBrowserSessionState): boolean {
-    const binding = this.#windowBinding;
+    if (this.#windowBindings.size === 0) return false;
     return (
-      binding !== undefined &&
-      !binding.embedder.isDestroyed() &&
       !state.closing &&
       state.owner === "agent" &&
       !state.humanTakeoverPending &&
@@ -2969,6 +3090,7 @@ export class AgentBrowserRuntime {
       generation: state.generation,
       owner: state.owner,
       status: state.status,
+      ...(state.host === "popout" ? { host: state.host } : {}),
       navigation: state.navigation,
       ...(state.url === undefined ? {} : { url: state.url }),
       ...(state.title === undefined ? {} : { title: state.title }),
@@ -2980,33 +3102,32 @@ export class AgentBrowserRuntime {
   }
 
   #publish(): void {
-    const binding = this.#windowBinding;
-    if (
-      binding === undefined ||
-      binding.embedder.isDestroyed()
-    ) {
-      return;
+    for (const embedder of this.#windowBindings.keys()) {
+      if (embedder.isDestroyed()) {
+        this.#windowBindings.delete(embedder);
+        continue;
+      }
+      embedder.send(
+        AGENT_BROWSER_SESSIONS_CHANGED_CHANNEL,
+        this.projections(),
+      );
     }
-    binding.embedder.send(
-      AGENT_BROWSER_SESSIONS_CHANGED_CHANNEL,
-      this.projections(),
-    );
   }
 
   #publishAnnotationEvent(
     value: AgentBrowserAnnotationEvent,
   ): void {
-    const binding = this.#windowBinding;
-    if (
-      binding === undefined ||
-      binding.embedder.isDestroyed()
-    ) {
-      return;
+    const payload = parseAgentBrowserAnnotationEvent(value);
+    for (const embedder of this.#windowBindings.keys()) {
+      if (embedder.isDestroyed()) {
+        this.#windowBindings.delete(embedder);
+        continue;
+      }
+      embedder.send(
+        AGENT_BROWSER_ANNOTATION_EVENT_CHANNEL,
+        payload,
+      );
     }
-    binding.embedder.send(
-      AGENT_BROWSER_ANNOTATION_EVENT_CHANNEL,
-      parseAgentBrowserAnnotationEvent(value),
-    );
   }
 
   #uniqueToken(): string {

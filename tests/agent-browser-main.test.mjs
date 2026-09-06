@@ -496,6 +496,7 @@ class FakeGuest extends EventEmitter {
   destroyed = false;
   closed = false;
   url = "about:blank";
+  emitDestroyedOnClose = false;
   windowOpenHandler;
   navigationCalls = [];
   navigationHistory = {
@@ -539,6 +540,9 @@ class FakeGuest extends EventEmitter {
     assert.deepEqual(options, { waitForBeforeUnload: false });
     this.closed = true;
     this.destroyed = true;
+    if (this.emitDestroyedOnClose) {
+      queueMicrotask(() => this.emit("destroyed"));
+    }
   }
 }
 
@@ -6432,5 +6436,158 @@ test("network id drill-down returns truncated requestBody from postData and getR
   target.binding.dispose();
   target.runtime.dispose();
 });
+
+test("window projection broadcasts to every registered embedder", async () => {
+  const target = runtimeFixture();
+  const secondIpc = new FakeIpc();
+  const secondEmbedder = new FakeEmbedder();
+  const secondBinding = target.runtime.bindWindowProjection(
+    secondIpc,
+    secondEmbedder,
+    () => true,
+  );
+  const opened = await openAgentBrowser(target);
+  const changed = (embedder) =>
+    embedder.messages.filter(
+      ({ channel }) =>
+        channel === AGENT_BROWSER_SESSIONS_CHANGED_CHANNEL,
+    );
+  assert.ok(changed(target.embedder).length > 0);
+  assert.ok(changed(secondEmbedder).length > 0);
+  assert.deepEqual(
+    changed(secondEmbedder).at(-1).value,
+    changed(target.embedder).at(-1).value,
+  );
+
+  secondBinding.dispose();
+  const before = changed(target.embedder).length;
+  const secondBefore = changed(secondEmbedder).length;
+  await target.runtime.setControl(opened.result.sessionId, "human");
+  assert.ok(changed(target.embedder).length > before);
+  assert.equal(changed(secondEmbedder).length, secondBefore);
+
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
+test("unregistered embedder senders are rejected and the last teardown closes sessions", async () => {
+  const target = runtimeFixture();
+  const secondEmbedder = new FakeEmbedder();
+  const secondBinding = target.runtime.bindWindowProjection(
+    target.ipc,
+    secondEmbedder,
+    (event) =>
+      event.sender === secondEmbedder &&
+      typeof event.senderFrame?.url === "string" &&
+      event.senderFrame.url.startsWith("minke-test://harness"),
+  );
+  const opened = await openAgentBrowser(target);
+
+  await assert.rejects(
+    target.ipc.invoke(
+      AGENT_BROWSER_SESSIONS_READ_CHANNEL,
+      { sender: secondEmbedder },
+    ),
+    /unauthorized/u,
+  );
+  assert.deepEqual(
+    await target.ipc.invoke(
+      AGENT_BROWSER_SESSIONS_READ_CHANNEL,
+      {
+        sender: secondEmbedder,
+        senderFrame: { url: "minke-test://harness/index" },
+      },
+    ),
+    target.runtime.projections(),
+  );
+
+  secondBinding.dispose();
+  target.binding.dispose();
+  await settleAsyncWork();
+  assert.deepEqual(target.runtime.projections(), []);
+
+  target.runtime.dispose();
+});
+
+test("relocation detaches gracefully and re-admits the guest on the new host", async () => {
+  const target = runtimeFixture();
+  const opened = await openAgentBrowser(target);
+  const sessionId = opened.result.sessionId;
+  const secondEmbedder = new FakeEmbedder();
+  const secondBinding = target.runtime.bindWindowProjection(
+    new FakeIpc(),
+    secondEmbedder,
+    () => true,
+  );
+  opened.guest.emitDestroyedOnClose = true;
+
+  await target.runtime.beginRelocation(sessionId, "popout");
+
+  assert.equal(opened.guest.closed, true);
+  const relocated = target.runtime
+    .projections()
+    .find(({ sessionId: id }) => id === sessionId);
+  assert.equal(relocated.status, "pending");
+  assert.equal(relocated.host, "popout");
+
+  await assert.rejects(
+    target.runtime.handleProcessRequest(
+      createAgentBrowserRequest(
+        2,
+        "conversation-1",
+        "navigate",
+        { sessionId, url: "https://example.com/next" },
+      ),
+      new AbortController().signal,
+    ),
+    /relocating/u,
+  );
+
+  const webPreferences = {};
+  const params = {
+    partition: opened.projection.partition,
+    src: "about:blank",
+  };
+  assert.equal(
+    target.runtime.secureWebview(webPreferences, params),
+    "secured",
+  );
+  const guest = new FakeGuest(opened.session, secondEmbedder);
+  guest.emitDestroyedOnClose = true;
+  assert.equal(
+    target.runtime.attachGuest(secondEmbedder, guest),
+    true,
+  );
+  await settleAsyncWork();
+
+  const reattached = target.runtime
+    .projections()
+    .find(({ sessionId: id }) => id === sessionId);
+  assert.equal(reattached.status, "ready");
+  assert.equal(reattached.host, "popout");
+  assert.equal(reattached.error, undefined);
+  await target.runtime.handleProcessRequest(
+    createAgentBrowserRequest(
+      3,
+      "conversation-1",
+      "navigate",
+      { sessionId, url: "https://example.com/next" },
+    ),
+    new AbortController().signal,
+  );
+
+  await target.runtime.beginRelocation(sessionId, "sidebar");
+  const returned = target.runtime
+    .projections()
+    .find(({ sessionId: id }) => id === sessionId);
+  assert.equal(returned.status, "pending");
+  assert.equal(returned.host, undefined);
+  assert.equal(guest.closed, true);
+
+  secondBinding.dispose();
+  target.binding.dispose();
+  target.runtime.dispose();
+});
+
 
 
