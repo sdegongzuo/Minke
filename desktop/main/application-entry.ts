@@ -10,7 +10,9 @@ export const PRODUCT_NAME = "Minke";
 export function prepareDesktopApplication(
   app: Pick<
     App,
+    | "getAppPath"
     | "getPath"
+    | "isPackaged"
     | "quit"
     | "requestSingleInstanceLock"
     | "setName"

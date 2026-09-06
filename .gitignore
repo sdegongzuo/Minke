@@ -14,6 +14,8 @@ node_modules
 out
 work/
 runtime/host
+# Local development DSH home (isolated via DSH_HOME in the dev launcher)
+.devdata/
 docs/research
 /packages/harness-overlay/lib/
 /packages/im-discord/lib/
