@@ -226,23 +226,32 @@ export class AgentBrowserPopoutRuntime {
     });
     const contents = window.webContents;
     this.#options.embedders.register(contents);
-    const tabsBinding = bindTabs(
-      ipcMain,
-      contents,
-      shell,
-      (candidate) => this.#options.embedders.authorize(candidate),
-      {
-        runtimeRoot: this.#options.runtimeRoot,
-        electronExecutable: this.#options.electronExecutable,
-        defaultCwd: this.#options.defaultCwd,
-        fileSystemRoot: this.#options.fileSystemRoot,
-        minkeConfigPath: this.#options.minkeConfigPath,
-        environment: this.#options.environment(),
-        agentBrowser: this.#options.agentBrowser,
-        prepareWebSession: () =>
-          this.#options.prepareWebSession(),
-      },
-    );
+    let tabsBinding: TabsBinding;
+    try {
+      tabsBinding = bindTabs(
+        ipcMain,
+        contents,
+        shell,
+        (candidate) => this.#options.embedders.authorize(candidate),
+        {
+          runtimeRoot: this.#options.runtimeRoot,
+          electronExecutable: this.#options.electronExecutable,
+          defaultCwd: this.#options.defaultCwd,
+          fileSystemRoot: this.#options.fileSystemRoot,
+          minkeConfigPath: this.#options.minkeConfigPath,
+          environment: this.#options.environment(),
+          agentBrowser: this.#options.agentBrowser,
+          prepareWebSession: () =>
+            this.#options.prepareWebSession(),
+        },
+      );
+    } catch (error) {
+      // Without this guard the window leaks: createPopout's catch only
+      // sees `window === undefined` because #createWindow never returned.
+      this.#options.embedders.unregister(contents);
+      window.destroy();
+      throw error;
+    }
     this.#popouts.set(contents, {
       window,
       sessionId,

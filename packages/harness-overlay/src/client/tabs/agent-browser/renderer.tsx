@@ -333,8 +333,7 @@ export function createAgentBrowserTabRenderer(
             controller={controller}
             t={t}
           />
-          {controller.canPopout(tab) &&
-            hasStableHumanControl(tab.payload) && (
+          {controller.canPopout(tab) && (
             <ToolbarButton
               label={t("agentBrowser.action.popout")}
               disabled={

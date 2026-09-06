@@ -237,13 +237,45 @@ async function rebuildRuntimeNativeModules(runtimeRoot) {
   const { rebuild } = await import("@electron/rebuild");
   const electronVersion = require("electron/package.json").version;
   console.log(`Rebuilding fs-ext for Electron ${electronVersion} (${process.arch})`);
-  await rebuild({
-    buildPath: runtimeRoot,
-    electronVersion,
-    arch: process.arch,
-    onlyModules: ["fs-ext"],
-    force: true,
-  });
+  // @electron/rebuild only walks dependencies declared in the build root's
+  // package.json; fs-ext reaches the runtime as a transitive deploy
+  // artifact, so declare it first or the rebuild silently does nothing.
+  const runtimePackageJsonPath = join(runtimeRoot, "package.json");
+  const runtimePackageJson = JSON.parse(
+    await readFile(runtimePackageJsonPath, "utf8"),
+  );
+  const fsExtPackageJson = JSON.parse(
+    await readFile(
+      join(runtimeRoot, "node_modules", "fs-ext", "package.json"),
+      "utf8",
+    ),
+  );
+  runtimePackageJson.dependencies = {
+    ...runtimePackageJson.dependencies,
+    "fs-ext": fsExtPackageJson.version,
+  };
+  await writeFileAtomic(
+    runtimePackageJsonPath,
+    JSON.stringify(runtimePackageJson, null, 2),
+  );
+  // npm_config_nodedir (set for the plain-Node vendor install) would also
+  // override @electron/rebuild's own node-gyp headers and yield a binary
+  // for the wrong ABI; scope it out of the Electron rebuild.
+  const inheritedNodedir = process.env.npm_config_nodedir;
+  delete process.env.npm_config_nodedir;
+  try {
+    await rebuild({
+      buildPath: runtimeRoot,
+      electronVersion,
+      arch: process.arch,
+      onlyModules: ["fs-ext"],
+      force: true,
+    });
+  } finally {
+    if (inheritedNodedir !== undefined) {
+      process.env.npm_config_nodedir = inheritedNodedir;
+    }
+  }
 }
 
 /** Reject missing or incompatible Session-lock binaries before publication or reuse. */

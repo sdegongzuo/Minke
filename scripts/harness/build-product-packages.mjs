@@ -310,7 +310,15 @@ await Promise.all([
     platform: "browser",
     target: "chrome120",
     tsconfig: tsconfigPath,
-    external: ["react", "react/jsx-runtime"],
+    // The harness frontend seeds these modules for plugin require; bundling
+    // a second react-dom copy mixes React internals with the frontend's
+    // react instance and crashes the loader import.
+    external: [
+      "react",
+      "react/jsx-runtime",
+      "react-dom",
+      "react-dom/client",
+    ],
     loader: {
       ".css": "text",
       ".png": "dataurl",

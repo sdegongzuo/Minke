@@ -151,6 +151,16 @@ export class AgentBrowserTabsController {
   readonly #controlErrors = new Map<string, string>();
   readonly #locallyClosed = new Set<string>();
   readonly #closeSent = new Set<string>();
+  readonly #autoPopoutGenerations = new Map<
+    string,
+    number
+  >();
+  readonly #autoPopoutTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
+  readonly #autoPopoutDone = new Set<string>();
+  #autoPopoutArmed = false;
   readonly #unsubscribePort: () => void;
   readonly #unsubscribeAnnotation: () => void;
   readonly #unsubscribeTabs: () => void;
@@ -774,6 +784,11 @@ export class AgentBrowserTabsController {
       .map((tab) => tab.id);
     this.#tabBySession.clear();
     this.#sessionByTab.clear();
+    for (const timer of this.#autoPopoutTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.#autoPopoutTimers.clear();
+    this.#autoPopoutGenerations.clear();
     for (const sessionId of sessions) this.#closeOnce(sessionId);
     for (const tabId of tabIds) this.#tabs.close(tabId);
     this.#controlPending.clear();
@@ -804,6 +819,10 @@ export class AgentBrowserTabsController {
       this.#applySnapshot(projections);
     } catch {
       // A later main-process projection can still hydrate the Tabs surface.
+    } finally {
+      // Hydration completes before auto-popout arms, so sessions that
+      // already existed never trigger a popout storm on (re)connect.
+      this.#autoPopoutArmed = true;
     }
   }
 
@@ -852,6 +871,70 @@ export class AgentBrowserTabsController {
       }
       this.#upsert(projection);
     }
+    this.#scheduleAutoPopouts(visible);
+  }
+
+  /**
+   * Auto-popout scheduling.
+   *
+   * A first-sighted session pops into its own window only after it has been
+   * quiet for a grace period: relocating a guest destroys its CDP session,
+   * so popping out while the agent is still driving the session (its first
+   * navigation, snapshots, ...) would break the in-flight tool command.
+   * Projection generation changes count as activity and re-arm the timer;
+   * when the agent goes quiet, the window opens. Only armed after initial
+   * hydration, and only in the sidebar: a session returning from a closed
+   * popout (host back to "sidebar") was already sighted, so closing a
+   * popout never re-triggers the popout.
+   */
+  static readonly AUTO_POPOUT_IDLE_MS = 10_000;
+
+  #scheduleAutoPopouts(
+    visible: readonly AgentBrowserProjection[],
+  ): void {
+    if (
+      this.#disposed ||
+      this.#role !== "sidebar" ||
+      !this.#autoPopoutArmed
+    ) {
+      return;
+    }
+    for (const projection of visible) {
+      if (this.#autoPopoutDone.has(projection.sessionId)) {
+        continue;
+      }
+      if (projection.host === "popout") {
+        // Already hosted in a popout (opened elsewhere): never auto-pop it.
+        this.#autoPopoutDone.add(projection.sessionId);
+        continue;
+      }
+      if (this.#locallyClosed.has(projection.sessionId)) {
+        continue;
+      }
+      const previous = this.#autoPopoutGenerations.get(
+        projection.sessionId,
+      );
+      if (previous === projection.generation) continue;
+      this.#autoPopoutGenerations.set(
+        projection.sessionId,
+        projection.generation,
+      );
+      this.#armAutoPopout(projection.sessionId);
+    }
+  }
+
+  #armAutoPopout(sessionId: string): void {
+    const existing = this.#autoPopoutTimers.get(sessionId);
+    if (existing !== undefined) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.#autoPopoutTimers.delete(sessionId);
+      if (this.#disposed) return;
+      this.#autoPopoutDone.add(sessionId);
+      const tabId = this.#tabBySession.get(sessionId);
+      if (tabId === undefined) return;
+      void this.openPopout(tabId);
+    }, AgentBrowserTabsController.AUTO_POPOUT_IDLE_MS);
+    this.#autoPopoutTimers.set(sessionId, timer);
   }
 
   #upsert(projection: AgentBrowserProjection): void {
@@ -937,6 +1020,9 @@ export class AgentBrowserTabsController {
     this.#sessionByTab.delete(tabId);
     this.#controlPending.delete(sessionId);
     this.#controlErrors.delete(sessionId);
+    // Auto-popout bookkeeping is intentionally kept: #forget also runs when
+    // a session is handed to a popout, and it must not re-trigger or reset
+    // the quiet period when the session later returns to the sidebar.
     this.#invalidateAnnotationLifecycle(tabId);
     this.#annotations.delete(tabId);
     this.#emitAnnotation(tabId);

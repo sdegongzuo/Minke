@@ -85,6 +85,111 @@ import {
   environmentValue,
 } from "../../../config/embedded-node-runtime.mts";
 
+type TabsIpcMainLike = Pick<
+  IpcMain,
+  "handle" | "on" | "removeHandler" | "removeListener"
+>;
+
+interface TabsRoute {
+  readonly authorize: TabsAuthorization;
+  readonly invoke: Map<
+    string,
+    (
+      event: IpcMainInvokeEvent,
+      payload: unknown,
+    ) => unknown
+  >;
+  readonly listen: Map<
+    string,
+    (event: IpcMainEvent, payload: unknown) => void
+  >;
+}
+
+interface TabsIpcHub {
+  add(route: TabsRoute): void;
+  remove(route: TabsRoute): void;
+}
+
+// ipcMain channels are process-global, but every window (main + popouts)
+// binds its own Tabs runtime. A hub registers each channel once per ipc
+// instance and routes events to the binding whose authorize accepts the
+// sender, so additional windows never collide on registration.
+const tabsIpcHubs = new WeakMap<TabsIpcMainLike, TabsIpcHub>();
+
+function tabsIpcHub(ipc: TabsIpcMainLike): TabsIpcHub {
+  const existing = tabsIpcHubs.get(ipc);
+  if (existing !== undefined) return existing;
+  const routes = new Set<TabsRoute>();
+  const invokeHandlers = new Map<
+    string,
+    (
+      event: IpcMainInvokeEvent,
+      payload: unknown,
+    ) => Promise<unknown>
+  >();
+  const listenHandlers = new Map<
+    string,
+    (event: IpcMainEvent, payload: unknown) => void
+  >();
+  const findRoute = (
+    event: IpcMainEvent | IpcMainInvokeEvent,
+  ): TabsRoute | undefined => {
+    for (const route of routes) {
+      if (route.authorize(event)) return route;
+    }
+    return undefined;
+  };
+  const hub: TabsIpcHub = {
+    add(route): void {
+      routes.add(route);
+      for (const channel of route.invoke.keys()) {
+        if (invokeHandlers.has(channel)) continue;
+        const handler = async (
+          event: IpcMainInvokeEvent,
+          payload: unknown,
+        ): Promise<unknown> => {
+          const target =
+            findRoute(event)?.invoke.get(channel);
+          if (target === undefined) {
+            throw new Error("unauthorized Tabs request");
+          }
+          return await target(event, payload);
+        };
+        invokeHandlers.set(channel, handler);
+        ipc.handle(channel, handler);
+      }
+      for (const channel of route.listen.keys()) {
+        if (listenHandlers.has(channel)) continue;
+        const handler = (
+          event: IpcMainEvent,
+          payload: unknown,
+        ): void => {
+          findRoute(event)?.listen.get(channel)?.(
+            event,
+            payload,
+          );
+        };
+        listenHandlers.set(channel, handler);
+        ipc.on(channel, handler);
+      }
+    },
+    remove(route): void {
+      routes.delete(route);
+      if (routes.size > 0) return;
+      for (const channel of [...invokeHandlers.keys()]) {
+        ipc.removeHandler(channel);
+        invokeHandlers.delete(channel);
+      }
+      for (const channel of [...listenHandlers.keys()]) {
+        ipc.removeListener(channel, listenHandlers.get(channel)!);
+        listenHandlers.delete(channel);
+      }
+    },
+  };
+  tabsIpcHubs.set(ipc, hub);
+  return hub;
+}
+
 interface TabsBindingOptions {
   readonly runtimeRoot: string;
   readonly electronExecutable: string;
@@ -411,40 +516,49 @@ export function bindTabs(
     }
   };
 
+  const route: TabsRoute = {
+    authorize,
+    invoke: new Map([
+      [
+        TABS_LAYOUT_STATE_READ_CHANNEL,
+        handleTabsLayoutStateRead,
+      ],
+      [
+        TABS_LAYOUT_STATE_WRITE_CHANNEL,
+        handleTabsLayoutStateWrite,
+      ],
+      [TABS_TERMINAL_CREATE_CHANNEL, handleTerminalCreate],
+      [TABS_FILES_LIST_CHANNEL, handleFilesList],
+      [TABS_FILES_DIFF_CHANNEL, handleFilesDiff],
+      [TABS_FILES_OPEN_CHANNEL, handleFilesOpen],
+      [TABS_FILES_PREVIEW_CHANNEL, handleFilesPreview],
+      [TABS_FILES_WRITE_CHANNEL, handleFilesWrite],
+      [
+        TABS_FILES_VIEW_STATE_READ_CHANNEL,
+        handleFilesViewStateRead,
+      ],
+      [
+        TABS_FILES_VIEW_STATE_WRITE_CHANNEL,
+        handleFilesViewStateWrite,
+      ],
+    ]),
+    listen: new Map([
+      [TABS_OPEN_EXTERNAL_CHANNEL, handleOpenExternal],
+      [
+        TABS_WEB_EXTERNAL_LINK_CHANNEL,
+        handleGuestExternalLink,
+      ],
+      [TABS_TERMINAL_WRITE_CHANNEL, handleTerminalWrite],
+      [TABS_TERMINAL_RESIZE_CHANNEL, handleTerminalResize],
+      [TABS_TERMINAL_CLOSE_CHANNEL, handleTerminalClose],
+      [TABS_FILES_WATCH_CHANNEL, handleFilesWatch],
+      [TABS_FILES_UNWATCH_CHANNEL, handleFilesUnwatch],
+    ]),
+  };
+  tabsIpcHub(ipc).add(route);
+
   embedder.on("will-attach-webview", handleWillAttach);
   embedder.on("did-attach-webview", handleDidAttach);
-  ipc.on(TABS_OPEN_EXTERNAL_CHANNEL, handleOpenExternal);
-  ipc.on(
-    TABS_WEB_EXTERNAL_LINK_CHANNEL,
-    handleGuestExternalLink,
-  );
-  ipc.handle(
-    TABS_LAYOUT_STATE_READ_CHANNEL,
-    handleTabsLayoutStateRead,
-  );
-  ipc.handle(
-    TABS_LAYOUT_STATE_WRITE_CHANNEL,
-    handleTabsLayoutStateWrite,
-  );
-  ipc.handle(TABS_TERMINAL_CREATE_CHANNEL, handleTerminalCreate);
-  ipc.on(TABS_TERMINAL_WRITE_CHANNEL, handleTerminalWrite);
-  ipc.on(TABS_TERMINAL_RESIZE_CHANNEL, handleTerminalResize);
-  ipc.on(TABS_TERMINAL_CLOSE_CHANNEL, handleTerminalClose);
-  ipc.handle(TABS_FILES_LIST_CHANNEL, handleFilesList);
-  ipc.handle(TABS_FILES_DIFF_CHANNEL, handleFilesDiff);
-  ipc.handle(TABS_FILES_OPEN_CHANNEL, handleFilesOpen);
-  ipc.handle(TABS_FILES_PREVIEW_CHANNEL, handleFilesPreview);
-  ipc.handle(TABS_FILES_WRITE_CHANNEL, handleFilesWrite);
-  ipc.handle(
-    TABS_FILES_VIEW_STATE_READ_CHANNEL,
-    handleFilesViewStateRead,
-  );
-  ipc.handle(
-    TABS_FILES_VIEW_STATE_WRITE_CHANNEL,
-    handleFilesViewStateWrite,
-  );
-  ipc.on(TABS_FILES_WATCH_CHANNEL, handleFilesWatch);
-  ipc.on(TABS_FILES_UNWATCH_CHANNEL, handleFilesUnwatch);
 
   let disposed = false;
   return {
@@ -453,49 +567,12 @@ export function bindTabs(
       disposed = true;
       embedder.removeListener("will-attach-webview", handleWillAttach);
       embedder.removeListener("did-attach-webview", handleDidAttach);
-      ipc.removeListener(
-        TABS_OPEN_EXTERNAL_CHANNEL,
-        handleOpenExternal,
-      );
-      ipc.removeListener(
-        TABS_WEB_EXTERNAL_LINK_CHANNEL,
-        handleGuestExternalLink,
-      );
+      tabsIpcHub(ipc).remove(route);
       for (const disposeHistory of webGuestHistoryBindings.values()) {
         disposeHistory();
       }
       webGuestHistoryBindings.clear();
       attachedWebGuests.clear();
-      ipc.removeHandler(TABS_LAYOUT_STATE_READ_CHANNEL);
-      ipc.removeHandler(TABS_LAYOUT_STATE_WRITE_CHANNEL);
-      ipc.removeHandler(TABS_TERMINAL_CREATE_CHANNEL);
-      ipc.removeListener(
-        TABS_TERMINAL_WRITE_CHANNEL,
-        handleTerminalWrite,
-      );
-      ipc.removeListener(
-        TABS_TERMINAL_RESIZE_CHANNEL,
-        handleTerminalResize,
-      );
-      ipc.removeListener(
-        TABS_TERMINAL_CLOSE_CHANNEL,
-        handleTerminalClose,
-      );
-      ipc.removeHandler(TABS_FILES_LIST_CHANNEL);
-      ipc.removeHandler(TABS_FILES_DIFF_CHANNEL);
-      ipc.removeHandler(TABS_FILES_OPEN_CHANNEL);
-      ipc.removeHandler(TABS_FILES_PREVIEW_CHANNEL);
-      ipc.removeHandler(TABS_FILES_WRITE_CHANNEL);
-      ipc.removeHandler(TABS_FILES_VIEW_STATE_READ_CHANNEL);
-      ipc.removeHandler(TABS_FILES_VIEW_STATE_WRITE_CHANNEL);
-      ipc.removeListener(
-        TABS_FILES_WATCH_CHANNEL,
-        handleFilesWatch,
-      );
-      ipc.removeListener(
-        TABS_FILES_UNWATCH_CHANNEL,
-        handleFilesUnwatch,
-      );
       agentBrowserProjection.dispose();
       fileWatch.dispose();
       void terminal.dispose();

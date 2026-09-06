@@ -826,6 +826,7 @@ test("every process.execPath production seam remains classified", async () => {
     }
   }
   assert.deepEqual(topLevelOwners.sort(), [
+    "desktop/main/app-data-paths.ts",
     "desktop/main/application.ts",
     "desktop/main/main-window.ts",
     "scripts/forge/run.mjs",
