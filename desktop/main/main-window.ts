@@ -48,7 +48,10 @@ import { createStatefulMainWindow } from "./main-window-state";
 import {
   minkeConfigFilePath,
 } from "./minke-config";
-import { isInternalNavigation } from "./navigation-policy";
+import {
+  canOpenExternally,
+  isInternalNavigation,
+} from "./navigation-policy";
 import {
   bindSessionLogExport,
   type SessionLogExportBinding,
@@ -72,16 +75,6 @@ export interface MainWindowRuntimeOptions {
   harnessUrl(): string | undefined;
   attachHarness(window: BrowserWindow): Promise<void>;
   refreshMenu(): void;
-}
-
-function canOpenExternally(value: string): boolean {
-  try {
-    return ["https:", "http:", "mailto:"].includes(
-      new URL(value).protocol,
-    );
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -120,12 +113,21 @@ export class MainWindowRuntime {
   /** Build the independent Agent Browser window runtime for this app. */
   createAgentBrowserPopoutRuntime(): AgentBrowserPopoutRuntime {
     return new AgentBrowserPopoutRuntime({
-      agentBrowser: this.#options.agentBrowser,
       embedders: this.#agentBrowserEmbedders,
       surfaceSession: this.#surfaceSession,
       harnessUrl: () => this.#options.harnessUrl(),
       locale: () => this.#activeLocale(),
       preloadPath: join(__dirname, "desktop-preload.js"),
+      ...this.#tabsGuestDeps(),
+    });
+  }
+
+  /**
+   * Dependencies shared by every webview guest binding, whether hosted in
+   * the main window's tabs or an Agent Browser popout.
+   */
+  #tabsGuestDeps() {
+    return {
       runtimeRoot: this.#runtimeRoot(),
       electronExecutable: process.execPath,
       defaultCwd: app.getPath("home"),
@@ -134,8 +136,9 @@ export class MainWindowRuntime {
         app.getPath("userData"),
       ),
       environment: this.#options.environment(),
+      agentBrowser: this.#options.agentBrowser,
       prepareWebSession: () => this.#prepareTabsWebSession(),
-    });
+    };
   }
 
   installPermissionPolicy(): void {
@@ -215,18 +218,7 @@ export class MainWindowRuntime {
       window.webContents,
       shell,
       (candidate) => this.authorize(candidate, window),
-      {
-        runtimeRoot: this.#runtimeRoot(),
-        electronExecutable: process.execPath,
-        defaultCwd: app.getPath("home"),
-        fileSystemRoot: parse(app.getPath("home")).root,
-        minkeConfigPath: minkeConfigFilePath(
-          app.getPath("userData"),
-        ),
-        environment: this.#options.environment(),
-        agentBrowser: this.#options.agentBrowser,
-        prepareWebSession: () => this.#prepareTabsWebSession(),
-      },
+      this.#tabsGuestDeps(),
     );
     this.#tabsBinding = tabsBinding;
 

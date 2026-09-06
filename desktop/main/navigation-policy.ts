@@ -21,3 +21,17 @@ export function isInternalNavigation(
     }
   });
 }
+
+/**
+ * Whether a URL is safe to hand to the operating system's external
+ * handler (browser or mail client) when the shell refuses to navigate.
+ */
+export function canOpenExternally(value: string): boolean {
+  try {
+    return ["https:", "http:", "mailto:"].includes(
+      new URL(value).protocol,
+    );
+  } catch {
+    return false;
+  }
+}

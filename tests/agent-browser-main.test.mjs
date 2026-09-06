@@ -6568,6 +6568,12 @@ test("relocation detaches gracefully and re-admits the guest on the new host", a
   assert.equal(reattached.status, "ready");
   assert.equal(reattached.host, "popout");
   assert.equal(reattached.error, undefined);
+  assert.deepEqual(
+    guest.debugger.commands
+      .filter(({ method }) => method === "Page.navigate")
+      .map(({ params }) => params.url),
+    ["https://example.com/start"],
+  );
   await target.runtime.handleProcessRequest(
     createAgentBrowserRequest(
       3,

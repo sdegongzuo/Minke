@@ -110,23 +110,29 @@ function AgentBrowserPopoutView({
   }, [port, sessionId]);
 
   const hosted = projection?.host === "popout";
+  const partition = projection?.partition;
+  const titleRef = useRef(sessionId);
+  titleRef.current = projection?.title ?? sessionId;
 
   useEffect(() => {
     const host = hostRef.current;
     if (host === null) return;
-    if (!hosted || projection === undefined) return;
+    // Mount only on host/partition transitions: remounting on every
+    // projection broadcast would destroy the attached guest (the runtime
+    // treats an unexpected guest destroy as a crash).
+    if (!hosted || partition === undefined) return;
     const view = host.ownerDocument.createElement(
       "webview",
     ) as WebviewTag;
     configureAgentBrowserWebview(view, {
-      partition: projection.partition,
-      label: projection.title ?? sessionId,
+      partition,
+      label: titleRef.current,
     });
     host.append(view);
     return () => {
       view.remove();
     };
-  }, [hosted, projection?.partition, projection, sessionId]);
+  }, [hosted, partition, sessionId]);
 
   if (projection === undefined) {
     return (

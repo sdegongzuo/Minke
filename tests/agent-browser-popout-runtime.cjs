@@ -8,6 +8,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { writeFileSync } = require('node:fs');
 const Module = require('node:module');
+const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const {
   app,
@@ -172,8 +173,8 @@ async function run() {
     () => fixture.url,
   );
   const preloadPath = join(
-    projectRoot,
-    '.agent-browser-popout-preload.cjs',
+    tmpdir(),
+    'agent-browser-popout-preload.cjs',
   );
   writeFileSync(preloadPath, '// intentionally empty\n');
   const popouts = new AgentBrowserPopoutRuntime({

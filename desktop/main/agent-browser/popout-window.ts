@@ -22,7 +22,10 @@ import {
   bindTabs,
   type TabsBinding,
 } from "../tabs";
-import { isInternalNavigation } from "../navigation-policy";
+import {
+  canOpenExternally,
+  isInternalNavigation,
+} from "../navigation-policy";
 import {
   macOSWindowOptions,
 } from "../macos-window";
@@ -53,16 +56,6 @@ interface AgentBrowserPopoutEntry {
   readonly window: BrowserWindow;
   readonly sessionId: string;
   readonly tabsBinding: TabsBinding;
-}
-
-function canOpenExternally(value: string): boolean {
-  try {
-    return ["https:", "http:", "mailto:"].includes(
-      new URL(value).protocol,
-    );
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -197,6 +190,10 @@ export class AgentBrowserPopoutRuntime {
       this.#popoutCloseHandler = undefined;
     }
     for (const entry of [...this.#popouts.values()]) {
+      this.#releasePopout(
+        entry.window.webContents,
+        entry.tabsBinding,
+      );
       if (!entry.window.isDestroyed()) {
         entry.window.destroy();
       }
@@ -226,10 +223,11 @@ export class AgentBrowserPopoutRuntime {
         webviewTag: true,
       },
     });
-    this.#options.embedders.register(window.webContents);
+    const contents = window.webContents;
+    this.#options.embedders.register(contents);
     const tabsBinding = bindTabs(
       ipcMain,
-      window.webContents,
+      contents,
       shell,
       (candidate) => this.#options.embedders.authorize(candidate),
       {
@@ -244,7 +242,7 @@ export class AgentBrowserPopoutRuntime {
           this.#options.prepareWebSession(),
       },
     );
-    this.#popouts.set(window.webContents, {
+    this.#popouts.set(contents, {
       window,
       sessionId,
       tabsBinding,
@@ -265,26 +263,31 @@ export class AgentBrowserPopoutRuntime {
           // The session may already be closed; nothing to send home.
         })
         .then(() => {
-          this.#releasePopout(window, tabsBinding);
+          this.#releasePopout(contents, tabsBinding);
           if (!window.isDestroyed()) {
             window.destroy();
           }
         });
     });
     window.once("closed", () => {
-      this.#releasePopout(window, tabsBinding);
+      this.#releasePopout(contents, tabsBinding);
     });
     window.once("ready-to-show", () => window.show());
     await this.#loadPopoutPage(window, sessionId);
     return window;
   }
 
+  /**
+   * Release a popout exactly once, keyed by the contents captured while
+   * the window was alive: the `closed` event fires after destruction,
+   * where `window.webContents` would already throw.
+   */
   #releasePopout(
-    window: BrowserWindow,
+    contents: WebContents,
     tabsBinding: TabsBinding,
   ): void {
-    this.#options.embedders.unregister(window.webContents);
-    this.#popouts.delete(window.webContents);
+    if (!this.#popouts.delete(contents)) return;
+    this.#options.embedders.unregister(contents);
     tabsBinding.dispose();
   }
 

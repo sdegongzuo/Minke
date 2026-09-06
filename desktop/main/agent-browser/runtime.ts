@@ -760,11 +760,15 @@ export class AgentBrowserRuntime {
       if (binding.authorize(event)) return;
       throw new Error("unauthorized Agent Browser request");
     }
-    // Real IPC events always carry a registered sender; the sweep only
-    // matters for synthesized events, and every production authorize
-    // verifies sender identity, so foreign senders still fail here.
-    for (const candidate of this.#windowBindings.values()) {
-      if (candidate.authorize(event)) return;
+    // Real IPC events always carry a sender, so a sender-less event can
+    // only be a synthesized test event; fall back to a sweep so such
+    // events authorize through any binding. Production authorize
+    // implementations verify sender identity, so real foreign senders
+    // never pass through either path.
+    if (event.sender === undefined) {
+      for (const candidate of this.#windowBindings.values()) {
+        if (candidate.authorize(event)) return;
+      }
     }
     throw new Error("unauthorized Agent Browser request");
   }
@@ -963,11 +967,16 @@ export class AgentBrowserRuntime {
       return true;
     }
 
+    const wasRelocating = state.relocating;
     state.guest = guest;
     state.relocating = false;
     state.resolveRelocation = undefined;
     this.#protectGuest(state, guest);
-    void this.#activateGuest(state, guest);
+    void this.#activateGuest(
+      state,
+      guest,
+      wasRelocating ? state.url : undefined,
+    );
     return true;
   }
 
@@ -2339,6 +2348,7 @@ export class AgentBrowserRuntime {
   async #activateGuest(
     state: AgentBrowserSessionState,
     guest: WebContents,
+    relocateTo?: string,
   ): Promise<void> {
     const cdp = new AgentBrowserCdp(guest.debugger, {
       commandTimeoutMs: this.#cdpTimeoutMs,
@@ -2393,6 +2403,59 @@ export class AgentBrowserRuntime {
       );
       state.attachment.reject(browserError);
       this.#crash(state, browserError.message);
+      return;
+    }
+    // A relocated guest re-attaches blank; restore the recorded page now
+    // that CDP is attached, mirroring the navigate command's semantics.
+    if (
+      relocateTo === undefined ||
+      state.closing ||
+      this.#states.get(state.sessionId) !== state
+    ) {
+      return;
+    }
+    state.status = "loading";
+    state.url = relocateTo;
+    delete state.error;
+    this.#publish();
+    try {
+      await cdp.navigate(
+        relocateTo,
+        new AbortController().signal,
+      );
+      if (
+        state.closing ||
+        this.#states.get(state.sessionId) !== state
+      ) {
+        return;
+      }
+      state.status = "ready";
+      if (
+        !await this.#publishCenteredCursor(
+          state,
+          cdp,
+          new AbortController().signal,
+        )
+      ) {
+        this.#publish();
+      }
+    } catch (error) {
+      const browserError = asAgentBrowserError(
+        error,
+        "navigation_failed",
+      );
+      if (
+        !state.closing &&
+        this.#states.get(state.sessionId) === state &&
+        !sessionCrashed(state)
+      ) {
+        state.status =
+          state.owner === "human" || state.humanTakeoverPending
+            ? "paused"
+            : "ready";
+        state.error = browserError.message.slice(0, 2_048);
+        this.#publish();
+      }
     }
   }
 
