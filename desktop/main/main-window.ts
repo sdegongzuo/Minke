@@ -31,6 +31,9 @@ import type {
   AgentBrowserRuntime,
 } from "./agent-browser";
 import {
+  AgentBrowserEmbedderRegistry,
+} from "./agent-browser/embedder-registry";
+import {
   installHarnessPermissionPolicy,
 } from "./harness-permission-policy";
 import { bindMacOSWindowButtonSpacing } from "./macos-window-controls";
@@ -84,6 +87,10 @@ function canOpenExternally(value: string): boolean {
  */
 export class MainWindowRuntime {
   readonly #options: MainWindowRuntimeOptions;
+  readonly #agentBrowserEmbedders =
+    new AgentBrowserEmbedderRegistry(
+      () => this.#options.harnessUrl(),
+    );
   readonly #surfaceSession: Session;
   #window: BrowserWindow | undefined;
   #sessionLogExportBinding: SessionLogExportBinding | undefined;
@@ -100,6 +107,11 @@ export class MainWindowRuntime {
 
   get current(): BrowserWindow | undefined {
     return this.#window;
+  }
+
+  /** Windows allowed to reach the Agent Browser projection channels. */
+  get agentBrowserEmbedders(): AgentBrowserEmbedderRegistry {
+    return this.#agentBrowserEmbedders;
   }
 
   installPermissionPolicy(): void {
@@ -170,6 +182,7 @@ export class MainWindowRuntime {
         this.authorize(candidate as IpcMainEvent, window),
     );
     this.#window = window;
+    this.#agentBrowserEmbedders.register(window.webContents);
     this.#options.refreshMenu();
     this.#protectNavigation(window);
 
@@ -238,6 +251,7 @@ export class MainWindowRuntime {
 
     window.once("ready-to-show", () => window.show());
     window.once("closed", () => {
+      this.#agentBrowserEmbedders.unregister(window.webContents);
       windowButtonSpacing?.dispose();
       sessionLogExportBinding.dispose();
       tabsBinding.dispose();
