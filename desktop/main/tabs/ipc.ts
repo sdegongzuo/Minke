@@ -120,17 +120,14 @@ function tabsIpcHub(ipc: TabsIpcMainLike): TabsIpcHub {
   const existing = tabsIpcHubs.get(ipc);
   if (existing !== undefined) return existing;
   const routes = new Set<TabsRoute>();
-  const invokeHandlers = new Map<
-    string,
-    (
-      event: IpcMainInvokeEvent,
-      payload: unknown,
-    ) => Promise<unknown>
-  >();
+  const invokeChannels = new Set<string>();
   const listenHandlers = new Map<
     string,
     (event: IpcMainEvent, payload: unknown) => void
   >();
+  // Every route authorizes exactly its own window's sender, so routes are
+  // disjoint and findRoute is unambiguous; a route matching a foreign
+  // sender would silently steal that window's events.
   const findRoute = (
     event: IpcMainEvent | IpcMainInvokeEvent,
   ): TabsRoute | undefined => {
@@ -143,7 +140,8 @@ function tabsIpcHub(ipc: TabsIpcMainLike): TabsIpcHub {
     add(route): void {
       routes.add(route);
       for (const channel of route.invoke.keys()) {
-        if (invokeHandlers.has(channel)) continue;
+        if (invokeChannels.has(channel)) continue;
+        invokeChannels.add(channel);
         const handler = async (
           event: IpcMainInvokeEvent,
           payload: unknown,
@@ -155,7 +153,6 @@ function tabsIpcHub(ipc: TabsIpcMainLike): TabsIpcHub {
           }
           return await target(event, payload);
         };
-        invokeHandlers.set(channel, handler);
         ipc.handle(channel, handler);
       }
       for (const channel of route.listen.keys()) {
@@ -176,14 +173,17 @@ function tabsIpcHub(ipc: TabsIpcMainLike): TabsIpcHub {
     remove(route): void {
       routes.delete(route);
       if (routes.size > 0) return;
-      for (const channel of [...invokeHandlers.keys()]) {
+      for (const channel of invokeChannels) {
         ipc.removeHandler(channel);
-        invokeHandlers.delete(channel);
       }
-      for (const channel of [...listenHandlers.keys()]) {
-        ipc.removeListener(channel, listenHandlers.get(channel)!);
-        listenHandlers.delete(channel);
+      invokeChannels.clear();
+      for (const [
+        channel,
+        handler,
+      ] of listenHandlers) {
+        ipc.removeListener(channel, handler);
       }
+      listenHandlers.clear();
     },
   };
   tabsIpcHubs.set(ipc, hub);
