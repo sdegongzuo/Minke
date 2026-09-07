@@ -88,7 +88,10 @@ function assertReleaseIdentity({
       "package version must be a stable semantic version",
     );
   }
-  if (releaseTag !== `v${packageVersion}`) {
+  if (
+    releaseTag !== `v${packageVersion}` &&
+    !releaseTag.startsWith(`v${packageVersion}-`)
+  ) {
     throw new Error(
       `tag ${String(releaseTag)} does not match package version v${packageVersion}`,
     );

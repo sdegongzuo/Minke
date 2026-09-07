@@ -155,6 +155,32 @@ test("release publication refuses mismatched tags and existing releases", async 
   assert.equal(existing.calls.length, 1);
 });
 
+test("release publication accepts suffixed fork tags for the same version", async () => {
+  const root = await releaseAssetFixture();
+  const assets = await discoverReleaseAssets(root);
+  const fake = runner([
+    result(1, "", "release not found"),
+    result(0),
+    result(0),
+    result(0, JSON.stringify({ immutable: true })),
+  ]);
+
+  await publishGithubRelease({
+    ...publishOptions(assets, fake.run),
+    releaseTag: "v0.3.0-fork.1",
+  });
+
+  assert.deepEqual(fake.calls[0], [
+    "release",
+    "view",
+    "v0.3.0-fork.1",
+  ]);
+  assert.deepEqual(
+    fake.calls[1].slice(0, 3),
+    ["release", "create", "v0.3.0-fork.1"],
+  );
+});
+
 test("mutable or unverifiable releases are returned to draft", async () => {
   const root = await releaseAssetFixture();
   const assets = await discoverReleaseAssets(root);
