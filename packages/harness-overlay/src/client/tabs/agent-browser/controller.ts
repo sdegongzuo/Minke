@@ -748,6 +748,7 @@ export class AgentBrowserTabsController {
     if (
       this.#disposed ||
       tab === undefined ||
+      !isAgentBrowserTab(tab) ||
       !this.canPopout(tab)
     ) {
       return false;
@@ -960,9 +961,11 @@ export class AgentBrowserTabsController {
   ): Promise<void> {
     if (this.#disposed) return;
     const tabId = this.#tabBySession.get(sessionId);
-    const tab = tabId === undefined
-      ? undefined
-      : this.#tabs.tab(tabId);
+    if (tabId === undefined) {
+      this.#markAutoPopoutDone(sessionId);
+      return;
+    }
+    const tab = this.#tabs.tab(tabId);
     if (
       tab === undefined ||
       !isAgentBrowserTab(tab) ||

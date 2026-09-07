@@ -354,6 +354,8 @@ export interface DesktopAgentBrowserBridge {
   commitAnnotation(
     request: AgentBrowserAnnotationRefreshRequest,
   ): Promise<unknown>;
+  openPopout(sessionId: string): Promise<unknown>;
+  closePopout(): void;
   close(sessionId: string): void;
   subscribe(
     listener: (projections: readonly AgentBrowserProjection[]) => void,
