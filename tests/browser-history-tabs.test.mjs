@@ -1895,6 +1895,9 @@ test("Agent Browser history action opens the canonical History tab", async () =>
     setOwner() {
       throw new Error("not used");
     },
+    canPopout() {
+      return false;
+    },
   };
   const renderer = createAgentBrowserTabRenderer(
     controller,
