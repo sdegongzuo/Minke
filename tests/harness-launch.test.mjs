@@ -8,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   harnessWebArguments,
@@ -58,7 +58,7 @@ import {
   parseReconfigureModelRuntimesRequest,
 } from "@lencx/minke-model-runtime/contract";
 
-const HARNESS_ORIGIN = "http://127.0.0.1:43117";
+const HARNESS_ORIGIN = "http://localhost:43117";
 const HARNESS_LAUNCH_TOKEN = "a".repeat(43);
 const HARNESS_AUTHENTICATED_URL =
   `${HARNESS_ORIGIN}/?token=${HARNESS_LAUNCH_TOKEN}`;
@@ -178,6 +178,10 @@ test("Harness readiness requires the exact alpha.2 authenticated loopback URL", 
     parseHarnessRuntimeEndpoint(HARNESS_AUTHENTICATED_URL),
     harnessEndpoint(),
   );
+  assert.deepEqual(
+    parseHarnessRuntimeEndpoint(`http://127.0.0.1:43117/?token=${HARNESS_LAUNCH_TOKEN}`),
+    harnessEndpoint(),
+  );
 
   for (const candidate of [
     HARNESS_ORIGIN,
@@ -186,7 +190,7 @@ test("Harness readiness requires the exact alpha.2 authenticated loopback URL", 
     `${HARNESS_AUTHENTICATED_URL}#fragment`,
     `${HARNESS_ORIGIN}/session?token=${HARNESS_LAUNCH_TOKEN}`,
     `${HARNESS_ORIGIN}/?token=${HARNESS_LAUNCH_TOKEN}&token=${HARNESS_LAUNCH_TOKEN}`,
-    `http://localhost:43117/?token=${HARNESS_LAUNCH_TOKEN}`,
+    `http://localhost.example.com:43117/?token=${HARNESS_LAUNCH_TOKEN}`,
     `https://127.0.0.1:43117/?token=${HARNESS_LAUNCH_TOKEN}`,
     `http://user@127.0.0.1:43117/?token=${HARNESS_LAUNCH_TOKEN}`,
   ]) {
@@ -273,6 +277,19 @@ test("the desktop runtime passes both explicit local-model opt-ins", () => {
       [MINKE_AGENT_BROWSER_DEBUG_ENABLED_ENV]: "0",
       PRESERVED: "yes",
       DSH_HOME: "/data/harness",
+      DSH_AGENTS_HOME: resolve("/data/harness", "agents"),
+      HOME: resolve("/data/harness", "home"),
+      USERPROFILE: resolve("/data/harness", "home"),
+      APPDATA: resolve("/data/harness", "home", "config"),
+      LOCALAPPDATA: resolve("/data/harness", "home", "local"),
+      XDG_CONFIG_HOME: resolve("/data/harness", "home", "config"),
+      XDG_DATA_HOME: resolve("/data/harness", "home", "local"),
+      XDG_CACHE_HOME: resolve("/data/harness", "home", "cache"),
+      XDG_STATE_HOME: resolve("/data/harness", "home", "state"),
+      npm_config_cache: resolve("/data/harness", "cache", "npm"),
+      npm_config_store_dir: resolve("/data/harness", "cache", "pnpm"),
+      npm_config_userconfig: resolve("/data/harness", "home", ".npmrc"),
+      PNPM_HOME: resolve("/data/harness", "cache", "pnpm-home"),
       ELECTRON_RUN_AS_NODE: "1",
       MINKE_INTERACTIVE_NODE_OPTIONS:
         "--require /tmp/ambient.cjs",

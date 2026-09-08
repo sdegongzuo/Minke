@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import {
   mkdtemp,
-  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -50,7 +49,6 @@ test("development keeps all data below the project root .devdata", async () => {
   } finally {
     if (previousDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousDshHome;
-    await rm(projectRoot, { recursive: true, force: true });
   }
 });
 
@@ -88,7 +86,6 @@ test("desktop configures data paths before claiming the process", async () => {
       ["lock"],
     ]);
   } finally {
-    await rm(projectRoot, { recursive: true, force: true });
   }
 });
 
@@ -112,7 +109,6 @@ test("a duplicate desktop process yields the single-instance claim", async () =>
     );
     assert.equal(quitCalls, 1);
   } finally {
-    await rm(projectRoot, { recursive: true, force: true });
   }
 });
 
@@ -127,11 +123,11 @@ test("portable root is auto-created beside the executable", async () => {
     // Already exists: idempotent, same result.
     assert.equal(portableRootForExecutable(exePath), expected);
     // A regular file occupying the path does not enable portable mode.
-    await rm(expected, { recursive: true, force: true });
-    await writeFile(expected, "not-a-directory");
-    assert.equal(portableRootForExecutable(exePath), undefined);
+    const blockedDir = await mkdtemp(join(tmpdir(), "minke-blocked-"));
+    await writeFile(join(blockedDir, "data"), "not-a-directory");
+    assert.equal(portableRootForExecutable(join(blockedDir, "Minke.exe")), undefined);
   } finally {
-    await rm(exeDir, { recursive: true, force: true });
+    // Preserve fixtures: this workspace forbids automatic file deletion.
   }
 });
 
@@ -167,12 +163,10 @@ test("packaged app auto-creates portable storage beside the binary", async () =>
   } finally {
     if (previousDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousDshHome;
-    await rm(homePath, { recursive: true, force: true });
-    await rm(exeDir, { recursive: true, force: true });
   }
 });
 
-test("packaged app falls back to ~/.minke when the exe directory is unusable", async () => {
+test("packaged app refuses an unusable portable directory", async () => {
   const homePath = await mkdtemp(join(tmpdir(), "minke-home-"));
   const exeDir = await mkdtemp(join(tmpdir(), "minke-exe-"));
   // A file named "data" blocks portable storage, simulating an unusable path.
@@ -181,7 +175,7 @@ test("packaged app falls back to ~/.minke when the exe directory is unusable", a
   const previousDshHome = process.env.DSH_HOME;
   delete process.env.DSH_HOME;
   try {
-    configureAppDataPaths(
+    assert.throws(() => configureAppDataPaths(
       {
         isPackaged: true,
         getAppPath: () => {
@@ -193,22 +187,17 @@ test("packaged app falls back to ~/.minke when the exe directory is unusable", a
         },
       },
       { execPath: join(exeDir, "Minke.exe") },
-    );
+    ), /portable data directory/);
 
-    assert.deepEqual(calls, [
-      ["userData", join(homePath, ".minke")],
-      ["sessionData", join(homePath, ".minke")],
-    ]);
+    assert.deepEqual(calls, []);
     assert.equal(process.env.DSH_HOME, undefined);
   } finally {
     if (previousDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousDshHome;
-    await rm(homePath, { recursive: true, force: true });
-    await rm(exeDir, { recursive: true, force: true });
   }
 });
 
-test("an explicit DSH_HOME is never overridden", async () => {
+test("an inherited DSH_HOME cannot override the application directory", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "minke-project-"));
   const forcedDshHome = join(projectRoot, "custom-dsh");
   const previousDshHome = process.env.DSH_HOME;
@@ -217,10 +206,9 @@ test("an explicit DSH_HOME is never overridden", async () => {
     configureAppDataPaths(
       devApp(projectRoot, () => {}, () => projectRoot),
     );
-    assert.equal(process.env.DSH_HOME, forcedDshHome);
+    assert.equal(process.env.DSH_HOME, join(projectRoot, ".devdata", "dsh"));
   } finally {
     if (previousDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousDshHome;
-    await rm(projectRoot, { recursive: true, force: true });
   }
 });

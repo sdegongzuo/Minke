@@ -193,7 +193,7 @@ function parseAuthenticatedReadyUrl(value) {
     const launchToken = entries[0]?.[1];
     if (
       url.protocol !== "http:" ||
-      url.hostname !== "127.0.0.1" ||
+      !["127.0.0.1", "localhost"].includes(url.hostname) ||
       url.port === "" ||
       url.username !== "" ||
       url.password !== "" ||
@@ -207,6 +207,7 @@ function parseAuthenticatedReadyUrl(value) {
     ) {
       throw new TypeError("invalid endpoint");
     }
+    url.hostname = "localhost";
     return {
       authenticatedUrl: url.href,
       baseUrl: url.origin,

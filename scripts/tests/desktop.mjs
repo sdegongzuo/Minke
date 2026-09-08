@@ -20,6 +20,7 @@ const taskFiles = Object.freeze({
     "agent-browser-main.test.mjs",
     "agent-browser-process-channel.test.mjs",
     "app-data-paths.test.mjs",
+    "runtime-isolation.test.mjs",
     "app-update-settings.test.mjs",
     "app-update.test.mjs",
     "appimage-packaging.test.mjs",

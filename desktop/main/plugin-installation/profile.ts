@@ -1,5 +1,6 @@
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { buildDshChildEnvironment } from "../data-home.ts";
 import {
   parseInstalledPluginsSnapshot,
   type InstalledPlugin,
@@ -256,7 +257,7 @@ export class WebPluginProfile {
     target: string,
   ): Promise<void> {
     const layout = await this.#readRuntimeLayout();
-    await mkdir(this.#dshHome, {
+    await mkdir(join(this.#dshHome, "home"), {
       recursive: true,
       mode: 0o700,
     });
@@ -266,7 +267,7 @@ export class WebPluginProfile {
         pnpmEntry: layout.pnpmEntry,
         runtimeBin: layout.runtimeBin,
       },
-      this.#environment,
+      buildDshChildEnvironment(this.#dshHome, this.#environment),
     );
     setEnvironmentName(environment, "DSH_HOME", this.#dshHome);
     await this.#runCommand(

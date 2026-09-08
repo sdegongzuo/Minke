@@ -1,6 +1,7 @@
 import type { App } from "electron";
 import { mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { setEnvironmentName } from "../../config/embedded-node-runtime.mts";
 
 /** Development data directory kept below the project root. */
 const DEV_DATA_DIR = ".devdata";
@@ -10,14 +11,11 @@ const PORTABLE_DIR = "data";
 const MINKE_SUBDIR = "minke";
 /** DSH home directory name. */
 const DSH_SUBDIR = "dsh";
-/** Fallback Electron data home under the user directory. */
-const HOME_MINKE_DIR = ".minke";
 
 /**
  * Resolve the portable data directory sitting next to a packaged executable,
- * creating it automatically when missing. Returns undefined (so the caller
- * falls back to the user's home) when a non-directory occupies the path or the
- * location is read-only (e.g. Program Files).
+ * creating it automatically when missing. Returns undefined when a
+ * non-directory occupies the path or the location is read-only.
  */
 export function portableRootForExecutable(
   execPath: string,
@@ -34,15 +32,15 @@ export function portableRootForExecutable(
 interface DataLayout {
   /** Directory assigned to Electron userData/sessionData. */
   userDataPath: string;
-  /** DSH home to export, or undefined to leave DSH resolution untouched. */
-  dshHome: string | undefined;
+  /** Private DSH home exported before any state is loaded. */
+  dshHome: string;
 }
 
 /**
  * Choose where durable state lives:
  * - development: everything below `<projectRoot>/.devdata`, self-contained;
  * - packaged, writable exe directory: portable `data` folder beside the binary;
- * - packaged but unwritable: the user's `~/.minke` fallback.
+ * - packaged but unwritable: stop instead of sharing a user's Harness data.
  */
 function resolveDataLayout(
   app: Pick<App, "getAppPath" | "getPath" | "isPackaged">,
@@ -62,14 +60,13 @@ function resolveDataLayout(
       dshHome: join(portableRoot, DSH_SUBDIR),
     };
   }
-  return {
-    userDataPath: join(app.getPath("home"), HOME_MINKE_DIR),
-    dshHome: undefined,
-  };
+  throw new Error(
+    `Cannot create portable data directory beside ${execPath}. Install Minke in a writable directory.`,
+  );
 }
 
 /**
- * Pin all durable Electron data (and the DSH home default) to the resolved
+ * Pin Electron storage and the initial DSH home to the resolved
  * layout before the application acquires any durable state.
  */
 export function configureAppDataPaths(
@@ -84,13 +81,8 @@ export function configureAppDataPaths(
   mkdirSync(layout.userDataPath, { recursive: true, mode: 0o700 });
   app.setPath("userData", layout.userDataPath);
   app.setPath("sessionData", layout.userDataPath);
-  if (layout.dshHome === undefined) return;
-  // An explicitly exported DSH_HOME still wins; this only fills the default.
-  if (
-    process.env.DSH_HOME === undefined ||
-    process.env.DSH_HOME.trim() === ""
-  ) {
-    mkdirSync(layout.dshHome, { recursive: true, mode: 0o700 });
-    process.env.DSH_HOME = layout.dshHome;
-  }
+  mkdirSync(layout.dshHome, { recursive: true, mode: 0o700 });
+  // The launching shell may belong to a standalone DSH installation.
+  // Only this process is changed; the shell and other Harness processes keep theirs.
+  setEnvironmentName(process.env, "DSH_HOME", layout.dshHome);
 }

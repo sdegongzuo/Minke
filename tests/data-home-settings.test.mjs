@@ -92,6 +92,19 @@ test("Minke resolves one stable DSH home and child environment", () => {
     }),
     {
       DSH_HOME: join(home, "active"),
+      DSH_AGENTS_HOME: join(home, "active", "agents"),
+      HOME: join(home, "active", "home"),
+      USERPROFILE: join(home, "active", "home"),
+      APPDATA: join(home, "active", "home", "config"),
+      LOCALAPPDATA: join(home, "active", "home", "local"),
+      XDG_CONFIG_HOME: join(home, "active", "home", "config"),
+      XDG_DATA_HOME: join(home, "active", "home", "local"),
+      XDG_CACHE_HOME: join(home, "active", "home", "cache"),
+      XDG_STATE_HOME: join(home, "active", "home", "state"),
+      npm_config_cache: join(home, "active", "cache", "npm"),
+      npm_config_store_dir: join(home, "active", "cache", "pnpm"),
+      npm_config_userconfig: join(home, "active", "home", ".npmrc"),
+      PNPM_HOME: join(home, "active", "cache", "pnpm-home"),
       PATH: "/usr/bin",
     },
   );
@@ -130,15 +143,15 @@ test("initial active home inherits DSH while retaining existing Minke data", asy
   });
   assert.equal(
     await defaultManager.activePath(),
-    join(home, ".dsh"),
+    recommended,
   );
   assert.deepEqual(
     (
       await defaultManager.read()
     ).candidates.find(
-      ({ path }) => path === join(home, ".dsh"),
+      ({ path }) => path === recommended,
     )?.origins,
-    ["active", "default"],
+    ["active", "minke"],
   );
 
   await mkdir(recommended, { recursive: true });
@@ -640,7 +653,7 @@ test("scheduled migration switches config only after the restart-time merge succ
   assert.equal(snapshot.recommendedPath, recommended);
   assert.deepEqual(
     snapshot.candidates.map(({ path }) => path).sort(),
-    [recommended, defaultHome, environmentHome].sort(),
+    [recommended, environmentHome].sort(),
   );
 
   const plan = await manager.plan({
@@ -650,7 +663,7 @@ test("scheduled migration switches config only after the restart-time merge succ
   assert.equal(plan.mode, "merge");
   assert.deepEqual(
     plan.sourcePaths.sort(),
-    [defaultHome, environmentHome].sort(),
+    [environmentHome],
   );
   const scheduled = await manager.schedule({
     mode: "merge",
@@ -664,10 +677,7 @@ test("scheduled migration switches config only after the restart-time merge succ
   const completed = await manager.completePendingMigration();
   assert.equal(completed?.status, "completed");
   assert.equal(await config.dshHome.read(), recommended);
-  assert.equal(
-    await readFile(join(recommended, "default.txt"), "utf8"),
-    "default\n",
-  );
+  await assert.rejects(readFile(join(recommended, "default.txt"), "utf8"), /ENOENT/u);
   assert.equal(
     await readFile(join(recommended, "environment.txt"), "utf8"),
     "environment\n",
@@ -856,7 +866,7 @@ test("copied data-home journals reconcile activation before finalizing", async (
 test("failed restart-time migration preserves the previous active configuration", async () => {
   const home = await temporaryRoot("minke-data-home-failure-");
   const userData = join(home, ".minke");
-  const defaultHome = join(home, ".dsh");
+  const defaultHome = join(userData, "harness");
   const blockedTarget = join(home, "blocked-target");
   await mkdir(defaultHome, { recursive: true });
   await writeFile(join(defaultHome, "session.jsonl"), "data\n");
@@ -903,7 +913,7 @@ test("a corrupt migration receipt does not prevent Settings or startup recovery"
     "failed",
   );
   const snapshot = await manager.read();
-  assert.equal(snapshot.activePath, join(home, ".dsh"));
+  assert.equal(snapshot.activePath, join(userData, "harness"));
   assert.equal(snapshot.lastMigration?.status, "failed");
 });
 

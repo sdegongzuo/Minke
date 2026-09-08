@@ -1,5 +1,4 @@
 import { homedir } from "node:os";
-import { stat } from "node:fs/promises";
 import {
   join,
   parse,
@@ -8,6 +7,7 @@ import {
 } from "node:path";
 import {
   environmentValue,
+  deleteEnvironmentName,
   setEnvironmentName,
 } from "../../config/embedded-node-runtime.mts";
 import {
@@ -110,17 +110,6 @@ function expandHomePath(
   return path;
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
-}
-
 /** Mirror DSH's public explicit path > DSH_HOME > ~/.dsh contract. */
 export function resolveDshHomePath(
   configured?: string,
@@ -157,11 +146,31 @@ export function buildDshChildEnvironment(
   inherited: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const environment = { ...inherited };
+  const pluginHome = resolve(activeDshHome, "home");
+  for (const name of ["HOME", "USERPROFILE"]) {
+    setEnvironmentName(environment, name, pluginHome);
+  }
+  for (const [name, directory] of [
+    ["APPDATA", "config"],
+    ["LOCALAPPDATA", "local"],
+    ["XDG_CONFIG_HOME", "config"],
+    ["XDG_DATA_HOME", "local"],
+    ["XDG_CACHE_HOME", "cache"],
+    ["XDG_STATE_HOME", "state"],
+  ] as const) {
+    setEnvironmentName(environment, name, resolve(pluginHome, directory));
+  }
   setEnvironmentName(
     environment,
     "DSH_HOME",
     resolve(activeDshHome),
   );
+  setEnvironmentName(environment, "DSH_AGENTS_HOME", resolve(activeDshHome, "agents"));
+  deleteEnvironmentName(environment, "DSH_BUNDLED_SKILL_DIR");
+  setEnvironmentName(environment, "npm_config_cache", resolve(activeDshHome, "cache", "npm"));
+  setEnvironmentName(environment, "npm_config_store_dir", resolve(activeDshHome, "cache", "pnpm"));
+  setEnvironmentName(environment, "PNPM_HOME", resolve(activeDshHome, "cache", "pnpm-home"));
+  setEnvironmentName(environment, "npm_config_userconfig", resolve(pluginHome, ".npmrc"));
   return environment;
 }
 
@@ -393,11 +402,6 @@ export class DataHomeManager {
           this.#homeDirectory,
         )
       : undefined;
-    const defaultPath = resolveDshHomePath(
-      undefined,
-      {},
-      this.#homeDirectory,
-    );
     const paths = new Map<
       string,
       { path: string; origins: Set<DataHomeCandidateOrigin> }
@@ -423,7 +427,6 @@ export class DataHomeManager {
     if (environmentPath !== undefined) {
       add(environmentPath, "environment");
     }
-    add(defaultPath, "default");
 
     return await Promise.all(
       [...paths.values()].map(async ({ path, origins }) => ({
@@ -458,16 +461,8 @@ export class DataHomeManager {
         this.#homeDirectory,
       );
     }
-    const legacyMinkePath = recommendedMinkeDshHome(
+    return recommendedMinkeDshHome(
       this.#userDataPath,
-    );
-    if (await isDirectory(legacyMinkePath)) {
-      return legacyMinkePath;
-    }
-    return resolveDshHomePath(
-      undefined,
-      {},
-      this.#homeDirectory,
     );
   }
 

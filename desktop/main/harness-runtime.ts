@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { buildDshChildEnvironment } from "./data-home.ts";
 import {
   deleteEnvironmentName,
   embeddedNodeChildEnvironment,
@@ -138,7 +140,7 @@ export function harnessRuntimeEnvironment(
       pnpmEntry: layout.pnpmEntry,
       runtimeBin: layout.runtimeBin,
     },
-    inherited,
+    buildDshChildEnvironment(options.dshHome, inherited),
   );
   setEnvironmentName(environment, "DSH_HOME", options.dshHome);
   const pluginManagement =
@@ -238,7 +240,7 @@ export class HarnessRuntime {
       access(layout.runtimeBin),
       access(layout.productPatch),
     ]);
-    await mkdir(this.#options.dshHome, { recursive: true });
+    await mkdir(join(this.#options.dshHome, "home"), { recursive: true });
 
     this.#output = "";
     this.#readinessOutput = "";
@@ -559,7 +561,7 @@ export function parseHarnessRuntimeEndpoint(
     const launchToken = entries[0]?.[1];
     if (
       url.protocol !== "http:" ||
-      url.hostname !== "127.0.0.1" ||
+      !["127.0.0.1", "localhost"].includes(url.hostname) ||
       url.port === "" ||
       url.username !== "" ||
       url.password !== "" ||
@@ -573,6 +575,8 @@ export function parseHarnessRuntimeEndpoint(
     ) {
       throw new TypeError("invalid endpoint");
     }
+    // Keep the upstream IPv4 bind address private; browser sessions use localhost.
+    url.hostname = "localhost";
     return Object.freeze({
       origin: url.origin,
       authenticatedUrl: url.href,
